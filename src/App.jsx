@@ -171,7 +171,7 @@ export default function App() {
           {!isMobile && (
             <div>
               <div className="logo-title">PL/SQL <span>DocAgent</span></div>
-              <div className="logo-sub">Wiki Generator · Claude AI</div>
+              <div className="logo-sub">Wiki BY (csvelasquez)</div>
             </div>
           )}
           {isMobile && <span className="logo-title-mobile">DocAgent</span>}
