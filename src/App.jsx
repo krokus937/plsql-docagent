@@ -21,6 +21,38 @@ const deleteCookie = (name) => {
   document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
 }
 
+// GitHub Models allows ~8000 input tokens. System prompt ≈ 650 tokens → ~7000 left for code.
+const MAX_CODE_CHARS = 24000 // ~6000 tokens with safety margin
+
+function splitCode(code) {
+  if (code.length <= MAX_CODE_CHARS) return [code]
+
+  // Split at each CREATE (OR REPLACE)? boundary, keeping the keyword at the start of each part
+  const parts = code.split(/(?=\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b)/i)
+    .filter(p => p.trim())
+
+  if (parts.length < 2) {
+    // No natural split points — cut at MAX_CODE_CHARS
+    const chunks = []
+    for (let i = 0; i < code.length; i += MAX_CODE_CHARS) chunks.push(code.slice(i, i + MAX_CODE_CHARS))
+    return chunks
+  }
+
+  // Group parts into chunks that stay under MAX_CODE_CHARS
+  const chunks = []
+  let current = ''
+  for (const part of parts) {
+    if (current.length + part.length > MAX_CODE_CHARS && current.length > 0) {
+      chunks.push(current)
+      current = part
+    } else {
+      current += part
+    }
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
 export default function App() {
   // ── State ────────────────────────────────────────────────────────────────
   const [apiKey, setApiKey]           = useState(() => getCookie(COOKIE_NAME))
@@ -112,57 +144,69 @@ export default function App() {
     if (isMobile) setMobileView('output')
     abortRef.current = new AbortController()
 
+    const chunks = splitCode(code)
+    let full = '', t = 0
+
     try {
-      const resp = await fetch('/api/proxy', {
-        method: 'POST',
-        signal: abortRef.current.signal,
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-        body: JSON.stringify({
-          model: 'gpt-4.1',
-          max_tokens: 32768,
-          stream: true,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            {
-              role: 'user',
-              content: `Analiza el siguiente código PL/SQL y genera la documentación Wiki en Markdown.\n\nArchivo: ${fileName || 'codigo.sql'}\n\n\`\`\`sql\n${code}\n\`\`\``,
-            },
-          ],
-        }),
-      })
+      for (let ci = 0; ci < chunks.length; ci++) {
+        const isLast = ci === chunks.length - 1
 
-      if (!resp.ok) {
-        const e = await resp.json().catch(() => ({}))
-        throw new Error(e?.error?.message || `HTTP ${resp.status}`)
-      }
+        // Intermediate chunks: skip the index, it will be generated in the last chunk
+        const systemContent = chunks.length > 1 && !isLast
+          ? SYSTEM_PROMPT + '\n\nNOTA: Este es un fragmento parcial. Documenta los objetos presentes pero NO generes el ÍNDICE GENERAL todavía.'
+          : SYSTEM_PROMPT
 
-      setPhase('streaming')
-      const reader = resp.body.getReader()
-      const dec = new TextDecoder()
-      let full = '', t = 0
+        const userContent = `Analiza el siguiente código PL/SQL y genera la documentación Wiki en Markdown.\n\nArchivo: ${fileName || 'codigo.sql'}${chunks.length > 1 ? ` (parte ${ci + 1} de ${chunks.length})` : ''}\n\n\`\`\`sql\n${chunks[ci]}\n\`\`\``
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        for (const line of dec.decode(value, { stream: true }).split('\n')) {
-          if (!line.startsWith('data: ')) continue
-          const d = line.slice(6).trim()
-          if (d === '[DONE]') continue
-          try {
-            const j = JSON.parse(d)
-            const chunk = j.choices?.[0]?.delta?.content
-            if (chunk) {
-              full += chunk; t++
-              setMarkdown(full); setTokenCount(t * 4)
-              if (previewRef.current) previewRef.current.scrollTop = previewRef.current.scrollHeight
-            }
-          } catch {}
+        const resp = await fetch('/api/proxy', {
+          method: 'POST',
+          signal: abortRef.current.signal,
+          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+          body: JSON.stringify({
+            model: 'gpt-4.1',
+            max_tokens: 32768,
+            stream: true,
+            messages: [
+              { role: 'system', content: systemContent },
+              { role: 'user', content: userContent },
+            ],
+          }),
+        })
+
+        if (!resp.ok) {
+          const e = await resp.json().catch(() => ({}))
+          throw new Error(e?.error?.message || `HTTP ${resp.status}`)
         }
+
+        setPhase('streaming')
+        const reader = resp.body.getReader()
+        const dec = new TextDecoder()
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          for (const line of dec.decode(value, { stream: true }).split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            const d = line.slice(6).trim()
+            if (d === '[DONE]') continue
+            try {
+              const j = JSON.parse(d)
+              const delta = j.choices?.[0]?.delta?.content
+              if (delta) {
+                full += delta; t++
+                setMarkdown(full); setTokenCount(t * 4)
+                if (previewRef.current) previewRef.current.scrollTop = previewRef.current.scrollHeight
+              }
+            } catch {}
+          }
+        }
+
+        if (!isLast) { full += '\n\n---\n\n'; setMarkdown(full) }
       }
       setPhase('done')
     } catch (err) {
       if (err.name !== 'AbortError') { setErrorMsg(`❌ ${err.message}`); setPhase('error') }
-      else setPhase(markdown ? 'done' : 'idle')
+      else setPhase(full ? 'done' : 'idle')
     } finally {
       clearInterval(timerRef.current)
     }
