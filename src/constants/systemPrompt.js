@@ -460,14 +460,14 @@ EMOJI por tipo: ⚙️ PROCEDURE · 🔧 FUNCTION · 📦 PACKAGE / PACKAGE BODY
 
 ESTRUCTURA OBLIGATORIA — usa EXACTAMENTE estos niveles de encabezado (## para el objeto, ### para sus secciones):
 
-## [emoji] NOMBRE_REAL — Título descriptivo del propósito en español
+## [emoji] [TIPO_EN_MAYÚSCULAS] — \`NOMBRE_REAL\`
+**[Título descriptivo del propósito en español — qué hace este objeto en una frase]**
 
-> **¿Qué hace en términos simples?**
-> [1-2 oraciones para persona NO técnica, sin mencionar SQL ni tablas]
+> [1-2 oraciones para persona NO técnica. Sin mencionar SQL, tablas ni código. Ejemplo: "Registra la venta de un producto cuando el cajero confirma el pedido y actualiza el inventario automáticamente."]
 
 ### 🎯 Propósito
 
-[Qué problema de negocio resuelve, en qué proceso se usa, qué área lo invoca]
+[Qué problema de negocio resuelve, en qué proceso se usa, qué área lo invoca, con qué frecuencia aproximada]
 
 ### 📥 Parámetros de Entrada
 
@@ -488,8 +488,12 @@ _(Omitir si no aplica)_
 
 ### 🔄 Flujo de Ejecución
 
-1. **[Nombre del paso]** — [acción concreta verificable en el código]
-2. **[Nombre del paso]** — [...]
+Cada paso debe ser concreto y verificable en el código. Usa un emoji temático por paso y menciona los nombres reales de tablas, cursores o procedimientos involucrados:
+
+1. **🔍 [Nombre del paso]** — [qué valida, consulta o calcula; qué tabla/variable usa]
+2. **📝 [Nombre del paso]** — [qué inserta, actualiza o delega; nombre real de la tabla/objeto]
+3. **✅ [Nombre del paso]** — [cómo termina: COMMIT, RETURN valor, output de parámetro, etc.]
+_(Agrega o elimina pasos según el código real; mínimo 2, sin límite máximo)_
 
 ### 💻 Ejemplos de Uso
 
