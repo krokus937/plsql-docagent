@@ -21,14 +21,11 @@ const deleteCookie = (name) => {
   document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
 }
 
-// Anthropic: ~200K context → 20K chars/chunk, max_tokens 8192 (no budget issue)
-// GitHub Models: 8K total budget (input + output combined).
-//   Full SYSTEM_PROMPT alone is ~7K tokens — exceeds the budget before any code.
-//   SYSTEM_PROMPT_COMPACT is ~280 tokens, leaving ~5K tokens for output per chunk.
-//   8K chars ≈ 2000 tokens of code → total input ~2300 tokens → ~5500 tokens for output.
-const CHUNK_ANTHROPIC   = 20000
-const CHUNK_GITHUB      = 8000
-const TOTAL_BUDGET_GH   = 7600   // 8K minus safety margin
+// GitHub Models: 8K total token budget (input + output combined).
+// OBJECT_DOC_PROMPT ≈ 450 tokens + 8K-char object ≈ 2500 tokens input → ~5100 tokens for output.
+// Anthropic never slices (200K context handles any single object).
+const CHUNK_GITHUB    = 8000
+const TOTAL_BUDGET_GH = 7600   // 8K minus safety margin
 
 // Subdivide a string into pieces of at most maxLen chars (fallback for oversized objects)
 function sliceAt(str, maxLen) {
@@ -244,6 +241,9 @@ export default function App() {
     try {
       // ── Phase 1: one isolated request per PL/SQL object ──────────────────
       for (let oi = 0; oi < objects.length; oi++) {
+        // Separator goes BEFORE each object so the --- visually opens a new block
+        if (oi > 0) { full += '\n\n---\n\n'; setMarkdown(full) }
+
         const objCode = objects[oi]
 
         // A single oversized object (e.g. a very large PACKAGE BODY) is split
@@ -263,8 +263,6 @@ export default function App() {
           setPhase('streaming')
           await streamResp(resp)
         }
-
-        if (oi < objects.length - 1) { full += '\n\n---\n\n'; setMarkdown(full) }
       }
 
       // ── Phase 2: executive index as a separate, focused request ──────────

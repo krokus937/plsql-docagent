@@ -440,8 +440,9 @@ _(Solo las que aparecen realmente en el código)_
 AL FINAL (último fragmento únicamente): genera # 📚 ÍNDICE GENERAL con resumen ejecutivo (2 párrafos), tabla de contenidos, diagrama ASCII de dependencias y glosario de términos.`
 
 // Dedicated prompt for per-object documentation.
-// Deliberately contains NO mention of index/summary — those are generated in a separate request.
-// Works for both Anthropic and GitHub Models (compact enough to fit in the 8K budget).
+// NO mention of index/summary — those are generated in a separate final request.
+// Uses ## for the object header and ### for sections, so the resulting wiki has
+// a clear visual hierarchy: ## object > ### section > #### sub-section.
 export const OBJECT_DOC_PROMPT = `Eres un experto documentador PL/SQL Oracle. Documenta el objeto PL/SQL que se te entrega en Markdown en español.
 
 INSTRUCCIÓN CRÍTICA: Genera ÚNICAMENTE la documentación de este objeto. NO incluyas ÍNDICE GENERAL, Resumen Ejecutivo, Tabla de Contenidos ni Diagrama de Dependencias.
@@ -457,31 +458,25 @@ REGLAS:
 
 EMOJI por tipo: ⚙️ PROCEDURE · 🔧 FUNCTION · 📦 PACKAGE / PACKAGE BODY · ⚡ TRIGGER · 🔷 TYPE
 
----
+ESTRUCTURA OBLIGATORIA — usa EXACTAMENTE estos niveles de encabezado (## para el objeto, ### para sus secciones):
 
-# [emoji] NOMBRE_REAL — Título descriptivo del propósito en español
+## [emoji] NOMBRE_REAL — Título descriptivo del propósito en español
 
 > **¿Qué hace en términos simples?**
 > [1-2 oraciones para persona NO técnica, sin mencionar SQL ni tablas]
 
----
-
-## 🎯 Propósito
+### 🎯 Propósito
 
 [Qué problema de negocio resuelve, en qué proceso se usa, qué área lo invoca]
 
----
-
-## 📥 Parámetros de Entrada
+### 📥 Parámetros de Entrada
 
 _(Omitir esta sección completa si no hay parámetros IN ni IN OUT)_
 
 | Parámetro | Tipo Oracle | Modo | ¿Obligatorio? | Descripción del negocio |
 |-----------|-------------|------|---------------|------------------------|
 
----
-
-## 📤 Retorno / Parámetros de Salida
+### 📤 Retorno / Parámetros de Salida
 
 _(Omitir si no aplica)_
 
@@ -491,16 +486,12 @@ _(Omitir si no aplica)_
 | Parámetro | Tipo | Descripción del valor devuelto |
 |-----------|------|-------------------------------|
 
----
-
-## 🔄 Flujo de Ejecución
+### 🔄 Flujo de Ejecución
 
 1. **[Nombre del paso]** — [acción concreta verificable en el código]
 2. **[Nombre del paso]** — [...]
 
----
-
-## 💻 Ejemplos de Uso
+### 💻 Ejemplos de Uso
 
 \`\`\`sql
 -- ✅ Ejemplo 1: [caso principal con nombre descriptivo]
@@ -522,34 +513,26 @@ END;
 -- 🟡 Resultado esperado: [excepción capturada, valor especial, rollback, etc.]
 \`\`\`
 
----
-
-## ⚠️ Manejo de Errores
+### ⚠️ Manejo de Errores
 
 _(Si NO hay bloque EXCEPTION: "Este objeto no contiene bloque EXCEPTION. Los errores se propagan al llamador.")_
 
 | Causa del error | Excepción | Comportamiento | Recomendación para el llamador |
 |-----------------|-----------|----------------|-------------------------------|
 
----
-
-## 🗄️ Dependencias
+### 🗄️ Dependencias
 
 | Tipo | Nombre real | Operación | Para qué se usa |
 |------|-------------|-----------|----------------|
 _(Incluir solo las que aparecen en el código)_
 
----
-
-## 📝 Notas Técnicas
+### 📝 Notas Técnicas
 
 - **Transaccionalidad:** [COMMIT/ROLLBACK propio, o delega al llamador, o sin DML]
 - **Performance:** _(solo si aplica: BULK COLLECT, FORALL, índices en filtros críticos)_
 - **Seguridad:** _(solo si aplica: SQL dinámico con EXECUTE IMMEDIATE, AUTHID)_
 
----
-
-## 🏷️ Ficha Técnica
+### 🏷️ Ficha Técnica
 
 | Campo | Valor |
 |-------|-------|
