@@ -227,7 +227,7 @@ export default function App() {
         signal: abortRef.current.signal,
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
         body: JSON.stringify({
-          model: isAnthropic ? 'claude-sonnet-4-5' : 'gpt-4o-mini',
+          model: isAnthropic ? 'claude-sonnet-4-6' : 'gpt-4o',
           max_tokens: maxOutputTokens,
           stream: true,
           messages: [
@@ -585,7 +585,7 @@ Estructura exacta:
             <div className="footer-status">
               <div className={`status-dot ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`} />
               <span className={`status-text ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`}>
-                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : apiKey.startsWith('sk-ant-') ? 'claude-sonnet-4-5' : 'gpt-4o-mini'}
+                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : apiKey.startsWith('sk-ant-') ? 'claude-sonnet-4-6' : 'gpt-4o'}
               </span>
             </div>
           </div>

@@ -67,7 +67,7 @@ export default async function handler(req) {
     const userMsgs   = body.messages?.filter(m => m.role !== 'system') ?? []
 
     const anthropicBody = {
-      model:      'claude-sonnet-4-5',
+      model:      'claude-sonnet-4-6',
       max_tokens: body.max_tokens ?? 8192,
       stream:     true,
       ...(systemMsg && { system: systemMsg.content }),
