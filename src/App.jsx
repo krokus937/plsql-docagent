@@ -21,10 +21,18 @@ const deleteCookie = (name) => {
   document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
 }
 
-// GitHub Models: ~8000 input tokens. System prompt ≈ 650t + manifest ≈ 300t → ~7000t for code.
-const MAX_CODE_CHARS = 22000 // ~5500 tokens, leaves room for manifest and prompt overhead
+// gpt-4o on GitHub Models: 128K context. System prompt ≈ 5400 tokens.
+// Keep chunks at ~20K chars so each call has enough budget for output.
+const MAX_CODE_CHARS = 20000
 
-// Split at logical PL/SQL object boundaries so no object is cut in half
+// Subdivide a string into pieces of at most maxLen chars
+function sliceAt(str, maxLen) {
+  const pieces = []
+  for (let i = 0; i < str.length; i += maxLen) pieces.push(str.slice(i, i + maxLen))
+  return pieces
+}
+
+// Split at logical PL/SQL object boundaries; never cuts inside an object
 function splitCode(code) {
   if (code.length <= MAX_CODE_CHARS) return [code]
 
@@ -32,20 +40,20 @@ function splitCode(code) {
     .split(/(?=\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b)/i)
     .filter(p => p.trim())
 
-  if (parts.length < 2) {
-    const chunks = []
-    for (let i = 0; i < code.length; i += MAX_CODE_CHARS) chunks.push(code.slice(i, i + MAX_CODE_CHARS))
-    return chunks
-  }
+  if (parts.length < 2) return sliceAt(code, MAX_CODE_CHARS)
 
+  // Group parts into chunks ≤ MAX_CODE_CHARS; oversized individual parts get sliced
   const chunks = []
   let current = ''
   for (const part of parts) {
-    if (current.length + part.length > MAX_CODE_CHARS && current.length > 0) {
-      chunks.push(current)
-      current = part
-    } else {
-      current += part
+    const safe = part.length <= MAX_CODE_CHARS ? [part] : sliceAt(part, MAX_CODE_CHARS)
+    for (const piece of safe) {
+      if (current.length + piece.length > MAX_CODE_CHARS && current.length > 0) {
+        chunks.push(current)
+        current = piece
+      } else {
+        current += piece
+      }
     }
   }
   if (current.length > 0) chunks.push(current)
@@ -188,13 +196,16 @@ export default function App() {
 
         const userContent = buildUserMessage(fileName, chunks[ci], ci, chunks.length, fullManifest)
 
+        // gpt-4o GitHub Models output cap is 16 384; use 8192 as safe practical limit
+        const maxOutputTokens = 8192
+
         const resp = await fetch('/api/proxy', {
           method: 'POST',
           signal: abortRef.current.signal,
           headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
           body: JSON.stringify({
-            model: 'gpt-4.1',
-            max_tokens: 32768,
+            model: 'gpt-4o',
+            max_tokens: maxOutputTokens,
             stream: true,
             messages: [
               { role: 'system', content: systemContent },
@@ -508,7 +519,7 @@ export default function App() {
             <div className="footer-status">
               <div className={`status-dot ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`} />
               <span className={`status-text ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`}>
-                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'gpt-4.1'}
+                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'gpt-4o'}
               </span>
             </div>
           </div>
