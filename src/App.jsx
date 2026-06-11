@@ -30,39 +30,19 @@ const CHUNK_ANTHROPIC   = 20000
 const CHUNK_GITHUB      = 8000
 const TOTAL_BUDGET_GH   = 7600   // 8K minus safety margin
 
-// Subdivide a string into pieces of at most maxLen chars
+// Subdivide a string into pieces of at most maxLen chars (fallback for oversized objects)
 function sliceAt(str, maxLen) {
   const pieces = []
   for (let i = 0; i < str.length; i += maxLen) pieces.push(str.slice(i, i + maxLen))
   return pieces
 }
 
-// Split at logical PL/SQL object boundaries; never cuts inside an object
-function splitCode(code, maxChars) {
-  if (code.length <= maxChars) return [code]
-
+// Split code into one element per PL/SQL object (PROCEDURE, FUNCTION, PACKAGE, TRIGGER, TYPE)
+function splitByObject(code) {
   const parts = code
     .split(/(?=\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b)/i)
     .filter(p => p.trim())
-
-  if (parts.length < 2) return sliceAt(code, maxChars)
-
-  // Group parts into chunks ≤ maxChars; oversized individual parts get sliced
-  const chunks = []
-  let current = ''
-  for (const part of parts) {
-    const safe = part.length <= maxChars ? [part] : sliceAt(part, maxChars)
-    for (const piece of safe) {
-      if (current.length + piece.length > maxChars && current.length > 0) {
-        chunks.push(current)
-        current = piece
-      } else {
-        current += piece
-      }
-    }
-  }
-  if (current.length > 0) chunks.push(current)
-  return chunks
+  return parts.length > 0 ? parts : [code]
 }
 
 // Extract object type + name pairs from PL/SQL code
@@ -76,23 +56,35 @@ function extractManifest(code) {
   return objects
 }
 
-// Build a structured markdown message so the model has full context about the file
-function buildUserMessage(fileName, chunkCode, chunkIndex, totalChunks, fullManifest) {
+// Build the per-object documentation request message
+function buildUserMessage(fileName, objCode, objIndex, totalObjects, fullManifest, pieceLabel = '') {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``]
 
-  if (totalChunks > 1 && fullManifest.length > 0) {
+  if (fullManifest.length > 0) {
     lines.push('', `## Inventario completo del archivo (${fullManifest.length} objetos)`)
     fullManifest.forEach((o, i) => lines.push(`${i + 1}. **${o.type}** → \`${o.name}\``))
   }
 
-  if (totalChunks > 1) {
-    const inChunk = extractManifest(chunkCode)
-    lines.push('', `## Fragmento ${chunkIndex + 1} de ${totalChunks} — objetos en este bloque`)
-    if (inChunk.length > 0) inChunk.forEach(o => lines.push(`- **${o.type}** → \`${o.name}\``))
-    else lines.push('_(fragmento sin cabeceras CREATE detectadas)_')
+  if (totalObjects > 1) {
+    const detected = extractManifest(objCode)
+    const label = detected.length > 0 ? detected.map(o => `${o.type} \`${o.name}\``).join(', ') : 'fragmento sin cabecera CREATE'
+    lines.push('', `## Objeto ${objIndex + 1} de ${totalObjects}${pieceLabel} — ${label}`)
   }
 
-  lines.push('', '## Código PL/SQL', '', '```sql', chunkCode, '```')
+  lines.push('', '## Código PL/SQL', '', '```sql', objCode, '```')
+  return lines.join('\n')
+}
+
+// Build the final index/summary request message
+function buildIndexMessage(fileName, fullCode, manifest, isAnthropic) {
+  const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
+  lines.push(`## Objetos documentados (${manifest.length} en total)`)
+  manifest.forEach((o, i) => lines.push(`${i + 1}. **${o.type}** → \`${o.name}\``))
+  // Anthropic: send full code so the model can derive accurate dependency relationships
+  // GitHub Models: manifest only — budget doesn't allow full code in this request
+  if (isAnthropic && fullCode) {
+    lines.push('', '## Código fuente completo (para análisis de dependencias)', '', '```sql', fullCode, '```')
+  }
   return lines.join('\n')
 }
 
@@ -189,82 +181,139 @@ export default function App() {
     if (isMobile) setMobileView('output')
     abortRef.current = new AbortController()
 
-    const isAnthropic = apiKey.startsWith('sk-ant-')
-    const chunkSize   = isAnthropic ? CHUNK_ANTHROPIC : CHUNK_GITHUB
-    const chunks      = splitCode(code, chunkSize)
-    const fullManifest = chunks.length > 1 ? extractManifest(code) : []
+    const isAnthropic  = apiKey.startsWith('sk-ant-')
+    const basePrompt   = isAnthropic ? SYSTEM_PROMPT : SYSTEM_PROMPT_COMPACT
+    // Prevents the model from hallucinating the index mid-stream;
+    // the index is generated as a separate final request from the full manifest.
+    const noIndexNote  = '\n\n---\n\n**IMPORTANTE:** NO incluyas el ÍNDICE GENERAL ni el Resumen Ejecutivo. Documenta únicamente el objeto PL/SQL del código proporcionado.'
+    const objSysPrompt = basePrompt + noIndexNote
+
+    const objects      = splitByObject(code)
+    const fullManifest = extractManifest(code)
     let full = '', t = 0
 
-    try {
-      // Anthropic: full 393-line prompt, 8192 output tokens, no budget issue
-      // GitHub Models: compact ~280-token prompt to stay well within 8K total budget
-      const basePrompt = isAnthropic ? SYSTEM_PROMPT : SYSTEM_PROMPT_COMPACT
-
-      for (let ci = 0; ci < chunks.length; ci++) {
-        const isLast = ci === chunks.length - 1
-
-        const systemContent = chunks.length > 1 && !isLast
-          ? basePrompt + `\n\n---\n\n**INSTRUCCIÓN (fragmento ${ci + 1} de ${chunks.length}):** Documenta ÚNICAMENTE los objetos de este fragmento con la estructura completa. NO incluyas el ÍNDICE GENERAL ni el Resumen Ejecutivo — esos se generan en el fragmento final.`
-          : basePrompt
-
-        const userContent = buildUserMessage(fileName, chunks[ci], ci, chunks.length, fullManifest)
-
-        // Anthropic: no budget cap → 8192 fixed
-        // GitHub Models: total budget 7600 (input + max_tokens) → calculate dynamically
-        const estimatedInput  = Math.ceil((systemContent.length + userContent.length) / 3.5)
-        const maxOutputTokens = isAnthropic
-          ? 8192
-          : Math.max(256, TOTAL_BUDGET_GH - estimatedInput)
-
-        if (!isAnthropic && estimatedInput >= TOTAL_BUDGET_GH) {
-          throw new Error(`Fragmento ${ci + 1} supera el límite de GitHub Models (${estimatedInput} tokens estimados). Usa una API key de Anthropic para archivos grandes.`)
+    // Stream one SSE response, appending each delta to `full`
+    const streamResp = async (resp) => {
+      const reader = resp.body.getReader()
+      const dec = new TextDecoder()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        for (const line of dec.decode(value, { stream: true }).split('\n')) {
+          if (!line.startsWith('data: ')) continue
+          const d = line.slice(6).trim()
+          if (d === '[DONE]') continue
+          try {
+            const j = JSON.parse(d)
+            const delta = j.choices?.[0]?.delta?.content
+            if (delta) {
+              full += delta; t++
+              setMarkdown(full); setTokenCount(t * 4)
+              if (previewRef.current) previewRef.current.scrollTop = previewRef.current.scrollHeight
+            }
+          } catch {}
         }
-
-        const resp = await fetch('/api/proxy', {
-          method: 'POST',
-          signal: abortRef.current.signal,
-          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-          body: JSON.stringify({
-            model: isAnthropic ? 'claude-sonnet-4-5' : 'gpt-4o-mini',
-            max_tokens: maxOutputTokens,
-            stream: true,
-            messages: [
-              { role: 'system', content: systemContent },
-              { role: 'user', content: userContent },
-            ],
-          }),
-        })
-
-        if (!resp.ok) {
-          const e = await resp.json().catch(() => ({}))
-          throw new Error(e?.error?.message || `HTTP ${resp.status}`)
-        }
-
-        setPhase('streaming')
-        const reader = resp.body.getReader()
-        const dec = new TextDecoder()
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          for (const line of dec.decode(value, { stream: true }).split('\n')) {
-            if (!line.startsWith('data: ')) continue
-            const d = line.slice(6).trim()
-            if (d === '[DONE]') continue
-            try {
-              const j = JSON.parse(d)
-              const delta = j.choices?.[0]?.delta?.content
-              if (delta) {
-                full += delta; t++
-                setMarkdown(full); setTokenCount(t * 4)
-                if (previewRef.current) previewRef.current.scrollTop = previewRef.current.scrollHeight
-              }
-            } catch {}
-          }
-        }
-
-        if (!isLast) { full += '\n\n---\n\n'; setMarkdown(full) }
       }
+    }
+
+    // Build and send one proxy request
+    const callProxy = async (systemContent, userContent, maxOut) => {
+      const estimatedInput  = Math.ceil((systemContent.length + userContent.length) / 3.5)
+      const maxOutputTokens = isAnthropic
+        ? maxOut
+        : Math.max(256, TOTAL_BUDGET_GH - estimatedInput)
+
+      if (!isAnthropic && estimatedInput >= TOTAL_BUDGET_GH) {
+        throw new Error(`Objeto demasiado grande para GitHub Models (${estimatedInput} tokens est.). Usa una key de Anthropic para archivos de este tamano.`)
+      }
+
+      return fetch('/api/proxy', {
+        method: 'POST',
+        signal: abortRef.current.signal,
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        body: JSON.stringify({
+          model: isAnthropic ? 'claude-sonnet-4-5' : 'gpt-4o-mini',
+          max_tokens: maxOutputTokens,
+          stream: true,
+          messages: [
+            { role: 'system', content: systemContent },
+            { role: 'user',   content: userContent   },
+          ],
+        }),
+      })
+    }
+
+    try {
+      // ── Phase 1: one isolated request per PL/SQL object ──────────────────
+      for (let oi = 0; oi < objects.length; oi++) {
+        const objCode = objects[oi]
+
+        // A single oversized object (e.g. a very large PACKAGE BODY) is split
+        // into pieces only as a last resort for GitHub Models' token budget.
+        const pieces = (!isAnthropic && objCode.length > CHUNK_GITHUB)
+          ? sliceAt(objCode, CHUNK_GITHUB)
+          : [objCode]
+
+        for (let pi = 0; pi < pieces.length; pi++) {
+          const pieceLabel  = pieces.length > 1 ? ` — parte ${pi + 1} de ${pieces.length}` : ''
+          const userContent = buildUserMessage(fileName, pieces[pi], oi, objects.length, fullManifest, pieceLabel)
+          const resp        = await callProxy(objSysPrompt, userContent, 8192)
+          if (!resp.ok) {
+            const e = await resp.json().catch(() => ({}))
+            throw new Error(e?.error?.message || `HTTP ${resp.status}`)
+          }
+          setPhase('streaming')
+          await streamResp(resp)
+        }
+
+        if (oi < objects.length - 1) { full += '\n\n---\n\n'; setMarkdown(full) }
+      }
+
+      // ── Phase 2: executive index as a separate, focused request ──────────
+      // Sending the index as its own request (with the full manifest as context)
+      // ensures no object hallucination bleeds in from earlier context.
+      full += '\n\n---\n\n'
+      setMarkdown(full)
+
+      const indexSysPrompt = `Eres un experto documentador PL/SQL Oracle. Genera UNICAMENTE el INDICE GENERAL del wiki en Markdown en espanol. No documentes objetos individuales.
+
+Estructura exacta:
+
+# 📚 INDICE GENERAL DEL WIKI
+
+## Resumen Ejecutivo
+[2-3 parrafos: que sistema o modulo representa este codigo, que procesos de negocio cubre, area (RRHH/Finanzas/Logistica/etc.), flujo de alto nivel entre objetos]
+
+---
+
+## Tabla de Contenidos
+| # | Objeto | Tipo | Proposito resumido (max. 12 palabras) | Complejidad |
+|---|--------|------|---------------------------------------|-------------|
+
+---
+
+## Diagrama de Dependencias
+\`\`\`
+[Nombre del sistema]
+├── OBJETO_1 ──→ tabla_a, tabla_b
+├── OBJETO_2 ──→ OBJETO_1, tabla_c
+└── OBJETO_3 ──→ tabla_d (TRIGGER)
+\`\`\`
+
+---
+
+## Glosario de Terminos
+| Termino tecnico | Significado para el negocio |
+|-----------------|----------------------------|`
+
+      const indexUser = buildIndexMessage(fileName, code, fullManifest, isAnthropic)
+      const indexResp = await callProxy(indexSysPrompt, indexUser, 4096)
+      if (!indexResp.ok) {
+        const e = await indexResp.json().catch(() => ({}))
+        throw new Error(e?.error?.message || `HTTP ${indexResp.status}`)
+      }
+      await streamResp(indexResp)
+
       setPhase('done')
     } catch (err) {
       if (err.name !== 'AbortError') { setErrorMsg(`❌ ${err.message}`); setPhase('error') }
