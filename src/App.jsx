@@ -87,12 +87,16 @@ export default function App() {
 
   // ── API Key validation ───────────────────────────────────────────────────
   const validateApiKey = async () => {
-    if (!apiKey.startsWith('sk-ant-')) { setApiKeyValid(false); return }
+    if (!apiKey.startsWith('ghp_') && !apiKey.startsWith('github_pat_')) { setApiKeyValid(false); return }
     try {
       const r = await fetch('/api/proxy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] }),
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          max_tokens: 5,
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
       })
       setApiKeyValid(r.status !== 401 && r.status !== 403)
     } catch { setApiKeyValid(false) }
@@ -114,14 +118,16 @@ export default function App() {
         signal: abortRef.current.signal,
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
+          model: 'gpt-4o',
           max_tokens: 8000,
           stream: true,
-          system: SYSTEM_PROMPT,
-          messages: [{
-            role: 'user',
-            content: `Analiza el siguiente código PL/SQL y genera la documentación Wiki en Markdown.\n\nArchivo: ${fileName || 'codigo.sql'}\n\n\`\`\`sql\n${code}\n\`\`\``,
-          }],
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            {
+              role: 'user',
+              content: `Analiza el siguiente código PL/SQL y genera la documentación Wiki en Markdown.\n\nArchivo: ${fileName || 'codigo.sql'}\n\n\`\`\`sql\n${code}\n\`\`\``,
+            },
+          ],
         }),
       })
 
@@ -144,8 +150,9 @@ export default function App() {
           if (d === '[DONE]') continue
           try {
             const j = JSON.parse(d)
-            if (j.type === 'content_block_delta' && j.delta?.text) {
-              full += j.delta.text; t++
+            const chunk = j.choices?.[0]?.delta?.content
+            if (chunk) {
+              full += chunk; t++
               setMarkdown(full); setTokenCount(t * 4)
               if (previewRef.current) previewRef.current.scrollTop = previewRef.current.scrollHeight
             }
@@ -199,7 +206,7 @@ export default function App() {
               type={apiKeyVisible ? 'text' : 'password'}
               value={apiKey}
               onChange={e => { setApiKey(e.target.value); setApiKeyValid(null) }}
-              placeholder={isMobile ? 'sk-ant-...' : 'sk-ant-api03-...'}
+              placeholder={isMobile ? 'ghp_...' : 'ghp_... o github_pat_...'}
               className={`apikey-input ${apiKeyValid === true ? 'valid' : apiKeyValid === false ? 'invalid' : ''}`}
             />
             <button onClick={() => setApiKeyVis(v => !v)} className="apikey-toggle">
@@ -214,7 +221,7 @@ export default function App() {
             {apiKeyValid === true ? '✅' : apiKeyValid === false ? '❌' : isMobile ? '✓' : 'Verificar'}
           </button>
           {apiKeyValid === false && !isMobile && (
-            <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="get-key-link">Obtener →</a>
+            <a href="https://github.com/settings/tokens" target="_blank" rel="noreferrer" className="get-key-link">Obtener →</a>
           )}
         </div>
       </header>
@@ -427,7 +434,7 @@ export default function App() {
             <div className="footer-status">
               <div className={`status-dot ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`} />
               <span className={`status-text ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`}>
-                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'claude-sonnet-4'}
+                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'gpt-4o'}
               </span>
             </div>
           </div>

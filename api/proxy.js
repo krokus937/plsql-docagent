@@ -1,6 +1,6 @@
 export const config = { runtime: 'edge' }
 
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages'
+const GITHUB_MODELS_API = 'https://models.inference.ai.azure.com/chat/completions'
 
 export default async function handler(req) {
   if (req.method !== 'POST') {
@@ -25,12 +25,11 @@ export default async function handler(req) {
     )
   }
 
-  const upstream = await fetch(ANTHROPIC_API, {
+  const upstream = await fetch(GITHUB_MODELS_API, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
+      'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify(body),
   })
