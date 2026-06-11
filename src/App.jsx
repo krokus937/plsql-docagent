@@ -468,7 +468,7 @@ export default function App() {
                   {[0,1,2].map(ri => <div key={ri} className={`ring ring-${ri}`} />)}
                   <div className="ring-icon">🔍</div>
                 </div>
-                <div className="analyzing-title">Enviando a Claude AI...</div>
+                <div className="analyzing-title">Analizando......</div>
                 <div className="analyzing-steps">
                   {['Detectando PROCEDUREs y FUNCTIONs','Analizando parámetros y tipos','Evaluando lógica de negocio','Identificando dependencias','Calculando complejidad'].map((step, i) => (
                     <div key={i} className="analyzing-step" style={{ animationDelay: `${i * 0.15}s` }}>
