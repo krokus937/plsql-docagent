@@ -4,9 +4,26 @@ import GitHubModal from './components/GitHubModal.jsx'
 import { SYSTEM_PROMPT } from './constants/systemPrompt.js'
 import './App.css'
 
+const COOKIE_NAME = 'plsql_api_key'
+const COOKIE_DAYS = 30
+
+const getCookie = (name) => {
+  const match = document.cookie.match(new RegExp(`(^| )${name}=([^;]+)`))
+  return match ? decodeURIComponent(match[2]) : ''
+}
+
+const setCookie = (name, value, days) => {
+  const expires = new Date(Date.now() + days * 864e5).toUTCString()
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Strict`
+}
+
+const deleteCookie = (name) => {
+  document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
+}
+
 export default function App() {
   // ── State ────────────────────────────────────────────────────────────────
-  const [apiKey, setApiKey]           = useState(() => sessionStorage.getItem('plsql_api_key') || '')
+  const [apiKey, setApiKey]           = useState(() => getCookie(COOKIE_NAME))
   const [apiKeyVisible, setApiKeyVis] = useState(false)
   const [apiKeyValid, setApiKeyValid] = useState(null)   // null | true | false
   const [code, setCode]               = useState('')
@@ -39,7 +56,10 @@ export default function App() {
   }, [])
 
   // ── Persist API key ──────────────────────────────────────────────────────
-  useEffect(() => { if (apiKey) sessionStorage.setItem('plsql_api_key', apiKey) }, [apiKey])
+  useEffect(() => {
+    if (apiKey) setCookie(COOKIE_NAME, apiKey, COOKIE_DAYS)
+    else deleteCookie(COOKIE_NAME)
+  }, [apiKey])
 
   // ── Code stats ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -69,9 +89,9 @@ export default function App() {
   const validateApiKey = async () => {
     if (!apiKey.startsWith('sk-ant-')) { setApiKeyValid(false); return }
     try {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
+      const r = await fetch('/api/proxy', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
         body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] }),
       })
       setApiKeyValid(r.status !== 401 && r.status !== 403)
@@ -89,15 +109,10 @@ export default function App() {
     abortRef.current = new AbortController()
 
     try {
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetch('/api/proxy', {
         method: 'POST',
         signal: abortRef.current.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
         body: JSON.stringify({
           model: 'claude-sonnet-4-20250514',
           max_tokens: 8000,
@@ -301,7 +316,7 @@ export default function App() {
               <button
                 className={`btn btn-main ${phase === 'done' ? 'success' : ''}`}
                 onClick={phase === 'done' ? handleReset : handleAnalyze}
-                disabled={phase !== 'done' && (!code.trim() || !apiKey.trim())}
+                disabled={phase !== 'done' && !code.trim()}
               >
                 {phase === 'done' ? '🔄 Nueva Doc' : '⚡ Analizar y Documentar'}
               </button>
@@ -353,10 +368,9 @@ export default function App() {
                 <div className="idle-icon">📋</div>
                 <div className="idle-title">Tu wiki aparecerá aquí</div>
                 <div className="idle-steps">
-                  <div>1️⃣ Ingresa tu <span>API Key</span> de Anthropic</div>
-                  <div>2️⃣ Carga tu <span>.sql</span> o pega el código</div>
-                  <div>3️⃣ Presiona <span>⚡ Analizar y Documentar</span></div>
-                  <div>4️⃣ Publica en <span className="green">🐙 GitHub</span> con un clic</div>
+                  <div>1️⃣ Carga tu <span>.sql</span> o pega el código</div>
+                  <div>2️⃣ Presiona <span>⚡ Analizar y Documentar</span></div>
+                  <div>3️⃣ Publica en <span className="green">🐙 GitHub</span> con un clic</div>
                 </div>
                 <div className="idle-features">
                   {['📦 Procedures','⚙️ Functions','📥 Parámetros','💻 SQL Examples','⚠️ Errors','🗄️ Dependencies','📊 Complexity','📚 Wiki Index'].map((f, i) => (

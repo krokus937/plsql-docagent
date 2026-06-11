@@ -1,7 +1,7 @@
 {
   "name": "plsql-docagent",
   "version": "1.0.0",
-  "description": "PL/SQL Documentation Agent — Wiki Generator powered by Claude AI",
+  "description": "PL/SQL Documentation Agent",
   "type": "module",
   "scripts": {
     "dev": "vite",
