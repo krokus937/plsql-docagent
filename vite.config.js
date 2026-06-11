@@ -1,11 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const REPO_NAME = 'plsql-docagent'  // ← cambia esto por el nombre de tu repo en GitHub
+const REPO_NAME = 'plsql-docagent'
+
+// Vercel sets VERCEL=1 automatically; GitHub Pages needs the repo subpath
+const isVercel = !!process.env.VERCEL
 
 export default defineConfig(({ command }) => ({
   plugins: [react()],
-  base: command === 'serve' ? '/' : `/${REPO_NAME}/`,
+  base: command === 'serve' || isVercel ? '/' : `/${REPO_NAME}/`,
   build: {
     outDir: 'dist',
     sourcemap: false,
