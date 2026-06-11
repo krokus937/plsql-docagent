@@ -344,7 +344,7 @@ Estructura exacta:
           {!isMobile && (
             <div>
               <div className="logo-title">PL/SQL <span>DocAgent</span></div>
-              <div className="logo-sub">Wiki BY (csvelasquez)</div>
+              <div className="logo-sub">Wiki BY (csvelasquez) <span className="version-badge">v{__APP_VERSION__}</span></div>
             </div>
           )}
           {isMobile && <span className="logo-title-mobile">DocAgent</span>}

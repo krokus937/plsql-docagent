@@ -58,7 +58,8 @@ a { color: #4299e1; }
 }
 .logo-title span { color: #4299e1; }
 .logo-title-mobile { font-family: 'Sora', sans-serif; font-weight: 800; font-size: 0.85rem; color: #4299e1; }
-.logo-sub { font-size: 0.52rem; color: #2a4060; letter-spacing: 1.5px; text-transform: uppercase; }
+.logo-sub { font-size: 0.52rem; color: #2a4060; letter-spacing: 1.5px; text-transform: uppercase; display: flex; align-items: center; gap: 0.4rem; }
+.version-badge { background: #1a2d4a; color: #4299e1; font-size: 0.5rem; font-weight: 700; padding: 0.1rem 0.35rem; border-radius: 3px; letter-spacing: 0.5px; text-transform: none; border: 1px solid #2a4a6a; }
 
 .header-apikey { flex: 1; display: flex; align-items: center; gap: 0.45rem; justify-content: flex-end; min-width: 0; }
 .apikey-wrap   { position: relative; display: flex; align-items: center; min-width: 0; }

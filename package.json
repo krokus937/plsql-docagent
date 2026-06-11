@@ -1,6 +1,6 @@
 {
   "name": "plsql-docagent",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "description": "PL/SQL Documentation Agent",
   "type": "module",
   "scripts": {
