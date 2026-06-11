@@ -21,9 +21,12 @@ const deleteCookie = (name) => {
   document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
 }
 
-// gpt-4o on GitHub Models: 128K context. System prompt ≈ 5400 tokens.
-// Keep chunks at ~20K chars so each call has enough budget for output.
-const MAX_CODE_CHARS = 20000
+// Anthropic: ~200K context → 20K chars/chunk, max_tokens 8192 (no budget issue)
+// GitHub Models: ~8K total budget (input + max_tokens combined); system prompt alone
+// is ~5400 tokens, leaving ~2400 tokens for code + output → 4K chars/chunk, dynamic max_tokens
+const CHUNK_ANTHROPIC   = 20000
+const CHUNK_GITHUB      = 4000
+const TOTAL_BUDGET_GH   = 7800   // slightly under 8000 for safety
 
 // Subdivide a string into pieces of at most maxLen chars
 function sliceAt(str, maxLen) {
@@ -33,22 +36,22 @@ function sliceAt(str, maxLen) {
 }
 
 // Split at logical PL/SQL object boundaries; never cuts inside an object
-function splitCode(code) {
-  if (code.length <= MAX_CODE_CHARS) return [code]
+function splitCode(code, maxChars) {
+  if (code.length <= maxChars) return [code]
 
   const parts = code
     .split(/(?=\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b)/i)
     .filter(p => p.trim())
 
-  if (parts.length < 2) return sliceAt(code, MAX_CODE_CHARS)
+  if (parts.length < 2) return sliceAt(code, maxChars)
 
-  // Group parts into chunks ≤ MAX_CODE_CHARS; oversized individual parts get sliced
+  // Group parts into chunks ≤ maxChars; oversized individual parts get sliced
   const chunks = []
   let current = ''
   for (const part of parts) {
-    const safe = part.length <= MAX_CODE_CHARS ? [part] : sliceAt(part, MAX_CODE_CHARS)
+    const safe = part.length <= maxChars ? [part] : sliceAt(part, maxChars)
     for (const piece of safe) {
-      if (current.length + piece.length > MAX_CODE_CHARS && current.length > 0) {
+      if (current.length + piece.length > maxChars && current.length > 0) {
         chunks.push(current)
         current = piece
       } else {
@@ -157,7 +160,9 @@ export default function App() {
 
   // ── API Key validation ───────────────────────────────────────────────────
   const validateApiKey = async () => {
-    if (!apiKey.startsWith('ghp_') && !apiKey.startsWith('github_pat_')) { setApiKeyValid(false); return }
+    const isAnthropic = apiKey.startsWith('sk-ant-')
+    const isGitHub    = apiKey.startsWith('ghp_') || apiKey.startsWith('github_pat_')
+    if (!isAnthropic && !isGitHub) { setApiKeyValid(false); return }
     try {
       const r = await fetch('/api/proxy', {
         method: 'POST',
@@ -182,7 +187,9 @@ export default function App() {
     if (isMobile) setMobileView('output')
     abortRef.current = new AbortController()
 
-    const chunks = splitCode(code)
+    const isAnthropic = apiKey.startsWith('sk-ant-')
+    const chunkSize   = isAnthropic ? CHUNK_ANTHROPIC : CHUNK_GITHUB
+    const chunks      = splitCode(code, chunkSize)
     const fullManifest = chunks.length > 1 ? extractManifest(code) : []
     let full = '', t = 0
 
@@ -196,8 +203,12 @@ export default function App() {
 
         const userContent = buildUserMessage(fileName, chunks[ci], ci, chunks.length, fullManifest)
 
-        // gpt-4o GitHub Models output cap is 16 384; use 8192 as safe practical limit
-        const maxOutputTokens = 8192
+        // Anthropic: no budget cap → use 8192 fixed
+        // GitHub Models: total budget 8K (input + max_tokens combined) → calculate dynamically
+        const estimatedInput  = Math.ceil((systemContent.length + userContent.length) / 3.5)
+        const maxOutputTokens = isAnthropic
+          ? 8192
+          : Math.max(256, TOTAL_BUDGET_GH - estimatedInput)
 
         const resp = await fetch('/api/proxy', {
           method: 'POST',
@@ -291,7 +302,7 @@ export default function App() {
               type={apiKeyVisible ? 'text' : 'password'}
               value={apiKey}
               onChange={e => { setApiKey(e.target.value); setApiKeyValid(null) }}
-              placeholder={isMobile ? 'ghp_...' : 'ghp_... o github_pat_...'}
+              placeholder={isMobile ? 'sk-ant-... o ghp_...' : 'sk-ant-api03-... ó ghp_...'}
               className={`apikey-input ${apiKeyValid === true ? 'valid' : apiKeyValid === false ? 'invalid' : ''}`}
             />
             <button onClick={() => setApiKeyVis(v => !v)} className="apikey-toggle">
@@ -306,7 +317,7 @@ export default function App() {
             {apiKeyValid === true ? '✅' : apiKeyValid === false ? '❌' : isMobile ? '✓' : 'Verificar'}
           </button>
           {apiKeyValid === false && !isMobile && (
-            <a href="https://github.com/settings/tokens" target="_blank" rel="noreferrer" className="get-key-link">Obtener →</a>
+            <a href={apiKey.startsWith('sk-ant-') ? 'https://console.anthropic.com/settings/keys' : 'https://github.com/settings/tokens'} target="_blank" rel="noreferrer" className="get-key-link">Obtener →</a>
           )}
         </div>
       </header>
