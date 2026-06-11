@@ -21,24 +21,23 @@ const deleteCookie = (name) => {
   document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
 }
 
-// GitHub Models allows ~8000 input tokens. System prompt ≈ 650 tokens → ~7000 left for code.
-const MAX_CODE_CHARS = 24000 // ~6000 tokens with safety margin
+// GitHub Models: ~8000 input tokens. System prompt ≈ 650t + manifest ≈ 300t → ~7000t for code.
+const MAX_CODE_CHARS = 22000 // ~5500 tokens, leaves room for manifest and prompt overhead
 
+// Split at logical PL/SQL object boundaries so no object is cut in half
 function splitCode(code) {
   if (code.length <= MAX_CODE_CHARS) return [code]
 
-  // Split at each CREATE (OR REPLACE)? boundary, keeping the keyword at the start of each part
-  const parts = code.split(/(?=\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b)/i)
+  const parts = code
+    .split(/(?=\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b)/i)
     .filter(p => p.trim())
 
   if (parts.length < 2) {
-    // No natural split points — cut at MAX_CODE_CHARS
     const chunks = []
     for (let i = 0; i < code.length; i += MAX_CODE_CHARS) chunks.push(code.slice(i, i + MAX_CODE_CHARS))
     return chunks
   }
 
-  // Group parts into chunks that stay under MAX_CODE_CHARS
   const chunks = []
   let current = ''
   for (const part of parts) {
@@ -51,6 +50,37 @@ function splitCode(code) {
   }
   if (current.length > 0) chunks.push(current)
   return chunks
+}
+
+// Extract object type + name pairs from PL/SQL code
+function extractManifest(code) {
+  const re = /\bCREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\s+(\w+)/gi
+  const objects = []
+  let m
+  while ((m = re.exec(code)) !== null) {
+    objects.push({ type: m[1].replace(/\s+/g, ' ').toUpperCase(), name: m[2] })
+  }
+  return objects
+}
+
+// Build a structured markdown message so the model has full context about the file
+function buildUserMessage(fileName, chunkCode, chunkIndex, totalChunks, fullManifest) {
+  const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``]
+
+  if (totalChunks > 1 && fullManifest.length > 0) {
+    lines.push('', `## Inventario completo del archivo (${fullManifest.length} objetos)`)
+    fullManifest.forEach((o, i) => lines.push(`${i + 1}. **${o.type}** → \`${o.name}\``))
+  }
+
+  if (totalChunks > 1) {
+    const inChunk = extractManifest(chunkCode)
+    lines.push('', `## Fragmento ${chunkIndex + 1} de ${totalChunks} — objetos en este bloque`)
+    if (inChunk.length > 0) inChunk.forEach(o => lines.push(`- **${o.type}** → \`${o.name}\``))
+    else lines.push('_(fragmento sin cabeceras CREATE detectadas)_')
+  }
+
+  lines.push('', '## Código PL/SQL', '', '```sql', chunkCode, '```')
+  return lines.join('\n')
 }
 
 export default function App() {
@@ -145,18 +175,18 @@ export default function App() {
     abortRef.current = new AbortController()
 
     const chunks = splitCode(code)
+    const fullManifest = chunks.length > 1 ? extractManifest(code) : []
     let full = '', t = 0
 
     try {
       for (let ci = 0; ci < chunks.length; ci++) {
         const isLast = ci === chunks.length - 1
 
-        // Intermediate chunks: skip the index, it will be generated in the last chunk
         const systemContent = chunks.length > 1 && !isLast
-          ? SYSTEM_PROMPT + '\n\nNOTA: Este es un fragmento parcial. Documenta los objetos presentes pero NO generes el ÍNDICE GENERAL todavía.'
+          ? SYSTEM_PROMPT + `\n\n---\n\n**INSTRUCCIÓN (fragmento ${ci + 1} de ${chunks.length}):** Documenta ÚNICAMENTE los objetos de este fragmento con la estructura completa. NO incluyas el ÍNDICE GENERAL ni el Resumen Ejecutivo — esos se generan en el fragmento final.`
           : SYSTEM_PROMPT
 
-        const userContent = `Analiza el siguiente código PL/SQL y genera la documentación Wiki en Markdown.\n\nArchivo: ${fileName || 'codigo.sql'}${chunks.length > 1 ? ` (parte ${ci + 1} de ${chunks.length})` : ''}\n\n\`\`\`sql\n${chunks[ci]}\n\`\`\``
+        const userContent = buildUserMessage(fileName, chunks[ci], ci, chunks.length, fullManifest)
 
         const resp = await fetch('/api/proxy', {
           method: 'POST',
