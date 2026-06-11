@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import MarkdownRenderer from './components/MarkdownRenderer.jsx'
 import GitHubModal from './components/GitHubModal.jsx'
-import { SYSTEM_PROMPT } from './constants/systemPrompt.js'
+import { SYSTEM_PROMPT, SYSTEM_PROMPT_COMPACT } from './constants/systemPrompt.js'
 import './App.css'
 
 const COOKIE_NAME = 'plsql_api_key'
@@ -22,11 +22,13 @@ const deleteCookie = (name) => {
 }
 
 // Anthropic: ~200K context → 20K chars/chunk, max_tokens 8192 (no budget issue)
-// GitHub Models: ~8K total budget (input + max_tokens combined); system prompt alone
-// is ~5400 tokens, leaving ~2400 tokens for code + output → 4K chars/chunk, dynamic max_tokens
+// GitHub Models: 8K total budget (input + output combined).
+//   Full SYSTEM_PROMPT alone is ~7K tokens — exceeds the budget before any code.
+//   SYSTEM_PROMPT_COMPACT is ~280 tokens, leaving ~5K tokens for output per chunk.
+//   8K chars ≈ 2000 tokens of code → total input ~2300 tokens → ~5500 tokens for output.
 const CHUNK_ANTHROPIC   = 20000
-const CHUNK_GITHUB      = 4000
-const TOTAL_BUDGET_GH   = 7800   // slightly under 8000 for safety
+const CHUNK_GITHUB      = 8000
+const TOTAL_BUDGET_GH   = 7600   // 8K minus safety margin
 
 // Subdivide a string into pieces of at most maxLen chars
 function sliceAt(str, maxLen) {
@@ -194,28 +196,36 @@ export default function App() {
     let full = '', t = 0
 
     try {
+      // Anthropic: full 393-line prompt, 8192 output tokens, no budget issue
+      // GitHub Models: compact ~280-token prompt to stay well within 8K total budget
+      const basePrompt = isAnthropic ? SYSTEM_PROMPT : SYSTEM_PROMPT_COMPACT
+
       for (let ci = 0; ci < chunks.length; ci++) {
         const isLast = ci === chunks.length - 1
 
         const systemContent = chunks.length > 1 && !isLast
-          ? SYSTEM_PROMPT + `\n\n---\n\n**INSTRUCCIÓN (fragmento ${ci + 1} de ${chunks.length}):** Documenta ÚNICAMENTE los objetos de este fragmento con la estructura completa. NO incluyas el ÍNDICE GENERAL ni el Resumen Ejecutivo — esos se generan en el fragmento final.`
-          : SYSTEM_PROMPT
+          ? basePrompt + `\n\n---\n\n**INSTRUCCIÓN (fragmento ${ci + 1} de ${chunks.length}):** Documenta ÚNICAMENTE los objetos de este fragmento con la estructura completa. NO incluyas el ÍNDICE GENERAL ni el Resumen Ejecutivo — esos se generan en el fragmento final.`
+          : basePrompt
 
         const userContent = buildUserMessage(fileName, chunks[ci], ci, chunks.length, fullManifest)
 
-        // Anthropic: no budget cap → use 8192 fixed
-        // GitHub Models: total budget 8K (input + max_tokens combined) → calculate dynamically
+        // Anthropic: no budget cap → 8192 fixed
+        // GitHub Models: total budget 7600 (input + max_tokens) → calculate dynamically
         const estimatedInput  = Math.ceil((systemContent.length + userContent.length) / 3.5)
         const maxOutputTokens = isAnthropic
           ? 8192
           : Math.max(256, TOTAL_BUDGET_GH - estimatedInput)
+
+        if (!isAnthropic && estimatedInput >= TOTAL_BUDGET_GH) {
+          throw new Error(`Fragmento ${ci + 1} supera el límite de GitHub Models (${estimatedInput} tokens estimados). Usa una API key de Anthropic para archivos grandes.`)
+        }
 
         const resp = await fetch('/api/proxy', {
           method: 'POST',
           signal: abortRef.current.signal,
           headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
           body: JSON.stringify({
-            model: 'gpt-4o',
+            model: isAnthropic ? 'claude-sonnet-4-5' : 'gpt-4o-mini',
             max_tokens: maxOutputTokens,
             stream: true,
             messages: [
@@ -530,7 +540,7 @@ export default function App() {
             <div className="footer-status">
               <div className={`status-dot ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`} />
               <span className={`status-text ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`}>
-                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'gpt-4o'}
+                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : apiKey.startsWith('sk-ant-') ? 'claude-sonnet-4-5' : 'gpt-4o-mini'}
               </span>
             </div>
           </div>
