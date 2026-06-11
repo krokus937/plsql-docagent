@@ -118,8 +118,8 @@ export default function App() {
         signal: abortRef.current.signal,
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
         body: JSON.stringify({
-          model: 'o4-mini',
-          max_completion_tokens: 32768,
+          model: 'gpt-4.1',
+          max_tokens: 32768,
           stream: true,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -434,7 +434,7 @@ export default function App() {
             <div className="footer-status">
               <div className={`status-dot ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`} />
               <span className={`status-text ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`}>
-                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'o4-mini'}
+                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : 'gpt-4.1'}
               </span>
             </div>
           </div>
