@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import MarkdownRenderer from './components/MarkdownRenderer.jsx'
 import GitHubModal from './components/GitHubModal.jsx'
-import { SYSTEM_PROMPT, SYSTEM_PROMPT_COMPACT } from './constants/systemPrompt.js'
+import { OBJECT_DOC_PROMPT } from './constants/systemPrompt.js'
 import './App.css'
 
 const COOKIE_NAME = 'plsql_api_key'
@@ -182,11 +182,9 @@ export default function App() {
     abortRef.current = new AbortController()
 
     const isAnthropic  = apiKey.startsWith('sk-ant-')
-    const basePrompt   = isAnthropic ? SYSTEM_PROMPT : SYSTEM_PROMPT_COMPACT
-    // Prevents the model from hallucinating the index mid-stream;
-    // the index is generated as a separate final request from the full manifest.
-    const noIndexNote  = '\n\n---\n\n**IMPORTANTE:** NO incluyas el ÍNDICE GENERAL ni el Resumen Ejecutivo. Documenta únicamente el objeto PL/SQL del código proporcionado.'
-    const objSysPrompt = basePrompt + noIndexNote
+    // OBJECT_DOC_PROMPT contains no mention of index/summary by design,
+    // preventing the model from generating them per-object.
+    const objSysPrompt = OBJECT_DOC_PROMPT
 
     const objects      = splitByObject(code)
     const fullManifest = extractManifest(code)
