@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { splitByObject, extractManifest, maskNonCode, splitPackageBodyMembers } from './App.jsx'
+import { splitByObject, extractManifest, maskNonCode, splitPackageBodyMembers, sliceAtStatementBoundary } from './App.jsx'
 
 describe('maskNonCode', () => {
   it('blanks out line comments', () => {
@@ -218,5 +218,57 @@ describe('splitPackageBodyMembers', () => {
   it('works standalone with only the PACKAGE BODY present, no spec in the file', () => {
     const manifest = extractManifest(simplePkgBody)
     expect(manifest.map(o => o.name)).toEqual(['registrar_venta', 'anular_venta', 'calcular_total'])
+  })
+})
+
+describe('sliceAtStatementBoundary', () => {
+  it('never cuts in the middle of a statement — every piece ends with a semicolon (except the last)', () => {
+    const body = 'BEGIN\n' + '  v_total := v_total + 1;\n'.repeat(300) + 'END;'
+    const pieces = sliceAtStatementBoundary(body, 500)
+    expect(pieces.length).toBeGreaterThan(1)
+    pieces.slice(0, -1).forEach(p => expect(p.trimEnd().endsWith(';')).toBe(true))
+  })
+
+  it('reassembles back to the exact original code with no loss or duplication', () => {
+    const body = 'BEGIN\n' + '  v_total := v_total + 1;\n'.repeat(300) + 'END;'
+    const pieces = sliceAtStatementBoundary(body, 500)
+    expect(pieces.join('')).toBe(body)
+  })
+
+  it('never uses a semicolon inside a string literal as a statement boundary', () => {
+    const stmt = "v_msg := 'texto con coma falso;aqui dentro sin cerrar aun mas relleno para superar maxlen';"
+    const body = 'BEGIN\n  ' + stmt + '\n  v_other := 1;\nEND;'
+    const fakeSemiPos = body.indexOf('falso;') + 'falso;'.length // right after the fake ';' inside the string
+    const realSemiPos = body.indexOf(stmt) + stmt.length          // right after the statement's real closing ';'
+    const maxLen = fakeSemiPos + 5 // just past the fake ';', but still well short of the real one
+    expect(maxLen).toBeLessThan(realSemiPos) // sanity check on the fixture itself
+
+    const pieces = sliceAtStatementBoundary(body, maxLen)
+    let cumulative = 0
+    for (const p of pieces.slice(0, -1)) {
+      cumulative += p.length
+      expect(cumulative).not.toBe(fakeSemiPos) // the fake ';' must never be chosen as a cut point
+    }
+    expect(pieces.join('')).toBe(body) // no data lost or duplicated regardless of how it was cut
+  })
+
+  it('returns the whole string as one piece when it already fits within maxLen', () => {
+    const body = 'BEGIN\n  NULL;\nEND;'
+    expect(sliceAtStatementBoundary(body, 5000)).toEqual([body])
+  })
+
+  it('falls back to a raw cut for a single statement longer than maxLen (rare edge case)', () => {
+    const hugeStatement = 'v_x := ' + "'a'".repeat(50) + ';'
+    const pieces = sliceAtStatementBoundary(hugeStatement, 20)
+    expect(pieces.join('')).toBe(hugeStatement)
+    expect(pieces.length).toBeGreaterThan(1)
+  })
+
+  it('produces roughly the expected number of pieces for a large object', () => {
+    const body = 'BEGIN\n' + '  v_total := v_total + 1; -- linea de relleno representativa\n'.repeat(2000) + 'END;'
+    const pieces = sliceAtStatementBoundary(body, 5000)
+    const expectedRoughly = Math.ceil(body.length / 5000)
+    expect(pieces.length).toBeGreaterThanOrEqual(expectedRoughly)
+    expect(pieces.length).toBeLessThan(expectedRoughly + 3)
   })
 })

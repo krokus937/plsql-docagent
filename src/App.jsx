@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import MarkdownRenderer from './components/MarkdownRenderer.jsx'
 import GitHubModal from './components/GitHubModal.jsx'
-import { OBJECT_DOC_PROMPT } from './constants/systemPrompt.js'
+import { OBJECT_DOC_PROMPT, OBJECT_DOC_CONTINUATION_PROMPT } from './constants/systemPrompt.js'
 import { stripOuterFence } from './utils/markdown.js'
 import './App.css'
 
@@ -22,17 +22,63 @@ const deleteCookie = (name) => {
   document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/; SameSite=Strict`
 }
 
-// GitHub Models: 8K total token budget (input + output combined).
-// OBJECT_DOC_PROMPT ≈ 450 tokens + 8K-char object ≈ 2500 tokens input → ~5100 tokens for output.
-// Anthropic never slices (200K context handles any single object).
-const CHUNK_GITHUB    = 8000
-const TOTAL_BUDGET_GH = 7600   // 8K minus safety margin
+// GitHub Models free/Copilot Pro/Business tier: input and output tokens are SEPARATE
+// per-request budgets — 8000 in / 4000 out — not one shared pool. (Source: GitHub Models
+// rate limits, docs.github.com/github-models/prototyping-with-ai-models — Copilot
+// Enterprise gets more: 16000 in / 8000 out for "high" models like gpt-4o.) Anthropic never
+// slices at all (200K context handles any single object in one shot, so none of this
+// applies to it).
+//
+// Most single objects — even fairly large ones — fit in ONE request under this budget, so
+// they're sent whole, exactly like the Anthropic path. Only when an object's code alone
+// would exceed the input budget does it get sliced — and even then, only the FIRST piece
+// gets the full OBJECT_DOC_PROMPT treatment. Pieces 2+ are genuine sequential continuations:
+// each receives a "digest" of everything found in earlier pieces of the SAME object (built
+// up as we go, see the Phase 1 loop) plus its own code chunk, and is asked to report only
+// what's genuinely new — real cross-referencing instead of blind trust that an earlier,
+// unseen call already covered something. Continuation pieces also run on gpt-4o-mini rather
+// than gpt-4o: it's a lighter "does this add anything new" task, and GitHub Models
+// rate-limits per model (see the "UserByModelByMinuteTokens" error format), so splitting the
+// load across two models also spreads consumption across two separate quotas.
+const MAX_INPUT_TOKENS_GH  = 7800  // 8000 minus a small safety margin
+const MAX_OUTPUT_TOKENS_GH = 3800  // 4000 minus a small safety margin
+// Char threshold (at ~3.5 chars/token) that decides whether an object's code alone still
+// fits the input budget after accounting for OBJECT_DOC_PROMPT (~500 tokens) and the
+// per-object message overhead (manifest listing, labels — a few hundred tokens, more for
+// files with many objects). Conservative relative to the ~24,500-char theoretical ceiling
+// so files with a large manifest still have headroom.
+const CHUNK_GITHUB = 20000
 
-// Subdivide a string into pieces of at most maxLen chars (fallback for oversized objects)
-export function sliceAt(str, maxLen) {
+// Slices oversized code into pieces that each end at a complete statement boundary (right
+// after a `;` that isn't inside a string/comment) instead of an arbitrary character cut, so
+// no piece ever hands the model a fragment cut off mid-identifier, mid-string, or mid-
+// expression. Greedily packs statements into each piece up to maxLen; if a single statement
+// itself exceeds maxLen (rare), that one statement is cut at maxLen as a last resort.
+export function sliceAtStatementBoundary(code, maxLen) {
+  const masked = maskNonCode(code)
+  const boundaries = []
+  const semiRe = /;/g
+  let m
+  while ((m = semiRe.exec(masked)) !== null) boundaries.push(m.index + 1)
+  if (boundaries.length === 0 || boundaries[boundaries.length - 1] !== code.length) boundaries.push(code.length)
+
   const pieces = []
-  for (let i = 0; i < str.length; i += maxLen) pieces.push(str.slice(i, i + maxLen))
-  return pieces
+  let pieceStart = 0
+  let lastBoundary = 0
+  for (const b of boundaries) {
+    if (b - pieceStart > maxLen) {
+      if (lastBoundary > pieceStart) {
+        pieces.push(code.slice(pieceStart, lastBoundary))
+        pieceStart = lastBoundary
+      } else {
+        pieces.push(code.slice(pieceStart, pieceStart + maxLen))
+        pieceStart += maxLen
+      }
+    }
+    lastBoundary = b
+  }
+  if (pieceStart < code.length) pieces.push(code.slice(pieceStart))
+  return pieces.filter(p => p.length > 0)
 }
 
 // Blank out string literals and comments (keeping length/offsets intact) so object
@@ -186,6 +232,20 @@ export function buildUserMessage(fileName, objCode, objIndex, totalObjects, full
   }
 
   lines.push('', '## Código PL/SQL', '', '```sql', objCode, '```')
+  return lines.join('\n')
+}
+
+// Build the message for a continuation piece (pieces 2+ of an object sliced for GitHub
+// Models' budget). Unlike buildUserMessage, this sends the running `digest` of everything
+// already found in earlier pieces of the SAME object as real context — the model can read
+// exactly what's already documented and compare against it, instead of only being told (via
+// OBJECT_DOC_CONTINUATION_PROMPT) to trust that something was already generated elsewhere.
+export function buildContinuationMessage(fileName, objCode, digest, pieceLabel) {
+  const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
+  lines.push(`## Documentación ya generada de este objeto${pieceLabel}`, '')
+  lines.push(digest || '_(Aún no se detectó información adicional en piezas anteriores — esta es la primera pieza de continuación.)_')
+  lines.push('', `> ⚠️ **Fragmento adicional, no un objeto nuevo:** lo de arriba es TODO lo ya documentado de este objeto. No lo repitas. El código de abajo puede no empezar o terminar en un límite lógico (p. ej. a mitad de un bloque IF o LOOP) — es una continuación directa del fragmento anterior.`)
+  lines.push('', '## Código PL/SQL (fragmento adicional)', '', '```sql', objCode, '```')
   return lines.join('\n')
 }
 
@@ -344,15 +404,16 @@ export default function App() {
       return text
     }
 
-    // Build and send one proxy request
-    const callProxy = async (systemContent, userContent, maxOut) => {
+    // Build and send one proxy request. `modelOverride` lets continuation pieces run on a
+    // lighter model (gpt-4o-mini) instead of the default — see the CHUNK_GITHUB comment.
+    const callProxy = async (systemContent, userContent, maxOut, modelOverride) => {
       const estimatedInput  = Math.ceil((systemContent.length + userContent.length) / 3.5)
-      const maxOutputTokens = isAnthropic
-        ? maxOut
-        : Math.max(256, TOTAL_BUDGET_GH - estimatedInput)
+      // Input and output are separate budgets on GitHub Models — output is simply capped at
+      // its own ceiling, never borrowed from whatever's left of the input budget.
+      const maxOutputTokens = isAnthropic ? maxOut : Math.min(maxOut, MAX_OUTPUT_TOKENS_GH)
 
-      if (!isAnthropic && estimatedInput >= TOTAL_BUDGET_GH) {
-        throw new Error(`Objeto demasiado grande para GitHub Models (${estimatedInput} tokens est.). Usa una key de Anthropic para archivos de este tamano.`)
+      if (!isAnthropic && estimatedInput >= MAX_INPUT_TOKENS_GH) {
+        throw new Error(`Objeto demasiado grande para GitHub Models (${estimatedInput} tokens de entrada est., limite ${MAX_INPUT_TOKENS_GH}). Usa una key de Anthropic para archivos de este tamano.`)
       }
 
       return fetch('/api/proxy', {
@@ -360,7 +421,7 @@ export default function App() {
         signal: abortRef.current.signal,
         headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
         body: JSON.stringify({
-          model: isAnthropic ? 'claude-sonnet-4-6' : 'gpt-4o',
+          model: modelOverride || (isAnthropic ? 'claude-sonnet-4-6' : 'gpt-4o'),
           max_tokens: maxOutputTokens,
           stream: true,
           messages: [
@@ -389,9 +450,9 @@ export default function App() {
     // either. Any other error (e.g. object too large for the provider's budget) is not
     // retried since waiting wouldn't help.
     const RATE_LIMIT_MAX_ATTEMPTS = 3
-    const requestWithRetry = async (systemContent, userContent, maxOut) => {
+    const requestWithRetry = async (systemContent, userContent, maxOut, modelOverride) => {
       for (let attempt = 1; attempt <= RATE_LIMIT_MAX_ATTEMPTS; attempt++) {
-        const resp = await callProxy(systemContent, userContent, maxOut)
+        const resp = await callProxy(systemContent, userContent, maxOut, modelOverride)
         if (resp.ok) return resp
         const e = await resp.json().catch(() => ({}))
         const message = e?.error?.message || `HTTP ${resp.status}`
@@ -424,8 +485,15 @@ export default function App() {
         // A single oversized object (e.g. a very large PACKAGE BODY) is split
         // into pieces only as a last resort for GitHub Models' token budget.
         const pieces = (!isAnthropic && objCode.length > CHUNK_GITHUB)
-          ? sliceAt(objCode, CHUNK_GITHUB)
+          ? sliceAtStatementBoundary(objCode, CHUNK_GITHUB)
           : [objCode]
+
+        // Running record of what's already been documented for THIS object, fed into every
+        // continuation piece so it can compare against real prior content instead of a blind
+        // "trust that it was covered" instruction. Seeded with the first piece's full doc;
+        // capped so a very chatty object can't blow past the provider's token budget.
+        let digest = ''
+        const DIGEST_CAP = 4000
 
         for (let pi = 0; pi < pieces.length; pi++) {
           // Show the trailing separator immediately (a no-op if `sections` is still
@@ -433,13 +501,29 @@ export default function App() {
           // still in flight, matching the previous eager-divider UX.
           setMarkdown(renderMarkdown(''))
 
-          const pieceLabel  = pieces.length > 1 ? ` — parte ${pi + 1} de ${pieces.length}` : ''
-          const userContent = buildUserMessage(fileName, pieces[pi], oi, objects.length, fullManifest, pieceLabel)
+          const pieceLabel = pieces.length > 1 ? ` — parte ${pi + 1} de ${pieces.length}` : ''
+          const isContinuation = pi > 0
+          // Only the FIRST piece gets the full documentation structure (title, description,
+          // examples, tables...). Continuation pieces (only reachable when GitHub Models'
+          // budget forced the slice) get the running digest as real context plus a shorter
+          // prompt that appends only genuinely new notes, on the lighter gpt-4o-mini model.
+          const userContent = isContinuation
+            ? buildContinuationMessage(fileName, pieces[pi], digest, pieceLabel)
+            : buildUserMessage(fileName, pieces[pi], oi, objects.length, fullManifest, pieceLabel)
+          const pieceSysPrompt = isContinuation ? OBJECT_DOC_CONTINUATION_PROMPT : objSysPrompt
+          const pieceModel     = isContinuation && !isAnthropic ? 'gpt-4o-mini' : undefined
           try {
-            const resp = await requestWithRetry(objSysPrompt, userContent, 8192)
+            const resp = await requestWithRetry(pieceSysPrompt, userContent, 8192, pieceModel)
             setPhase('streaming')
             const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
-            sections.push(stripOuterFence(text))
+            const clean = stripOuterFence(text)
+            sections.push(clean)
+            if (pi === 0) {
+              digest = clean
+            } else if (!/Sin información adicional relevante/i.test(clean)) {
+              digest += '\n\n' + clean.replace(/^###[^\n]*\n+/, '').trim()
+              if (digest.length > DIGEST_CAP) digest = digest.slice(-DIGEST_CAP)
+            }
           } catch (err) {
             if (err.name === 'AbortError') throw err // user hit Detener — stop everything
             failedCount++

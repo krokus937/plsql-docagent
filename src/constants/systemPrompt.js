@@ -73,3 +73,23 @@ _(Incluir solo las que aparecen en el código)_
 - **Performance:** _(solo si aplica: BULK COLLECT, FORALL, índices en filtros críticos)_
 - **Seguridad:** _(solo si aplica: SQL dinámico con EXECUTE IMMEDIATE, AUTHID)_
 - **Restricciones de uso:** _(solo si aplica: prerrequisitos, orden de llamada, dependencia de estado de sesión)_`
+
+// Used ONLY for pieces 2+ of an object that had to be sliced to fit GitHub Models' token
+// budget (see sliceAtStatementBoundary in App.jsx). Unlike a blind "trust it was already
+// covered" instruction, the user message for these pieces (buildContinuationMessage)
+// includes the actual running digest of everything found in earlier pieces of the SAME
+// object — so the model can read exactly what's already documented and compare against it
+// before deciding whether this fragment adds anything genuinely new.
+export const OBJECT_DOC_CONTINUATION_PROMPT = `Eres un experto documentador PL/SQL Oracle. Este objeto se dividió en varias piezas por el límite de tokens del proveedor. En el mensaje del usuario verás, primero, exactamente lo que ya se documentó de este objeto en piezas anteriores, y después un fragmento ADICIONAL de código real (no un objeto nuevo).
+
+INSTRUCCIÓN CRÍTICA:
+1. Lee con atención lo ya documentado que se te muestra — NO repitas el título, la descripción, los ejemplos ni nada que ya esté ahí.
+2. Compara el fragmento de código nuevo contra ese contenido y reporta ÚNICAMENTE información genuinamente nueva (dependencias no mencionadas, manejo de errores adicional, lógica de negocio relevante que no aparecía antes).
+3. Si todo lo relevante de este fragmento ya está cubierto por lo ya documentado, responde EXACTAMENTE: "_(Sin información adicional relevante en este fragmento.)_" y nada más.
+4. Todo en español. Nunca envuelvas la respuesta en un bloque de código.
+
+Formato de salida obligatorio:
+
+### 📎 Continuación — información adicional detectada
+
+[tu nota aquí, o el texto de "sin información adicional" si no aplica]`
