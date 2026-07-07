@@ -296,16 +296,31 @@ export default function App() {
 
     const objects      = splitByObject(code)
     const fullManifest = extractManifest(code)
-    let full = '', t = 0
 
-    // Stream one SSE response, appending each delta to `full`
-    const streamResp = async (resp) => {
+    // Each completed request's full text lands here as its own entry — the final
+    // Markdown is just these sections joined with a separator, so a partial/garbled
+    // response from one object can never bleed into the text of another, and a
+    // retried object simply replaces its own entry instead of redoing everything.
+    const sections = []
+    let t = 0
+    const renderMarkdown = (liveText) => [...sections, ...(liveText !== undefined ? [liveText] : [])].join('\n\n---\n\n')
+
+    // Streams one SSE response and returns its fully assembled text. Buffers any
+    // incomplete trailing line across reads() calls (a `data: {...}` JSON payload can
+    // be split across two network reads) so a chunk boundary can never silently drop
+    // or corrupt part of the response — mirrors the buffering api/proxy.js already
+    // does server-side for the Anthropic→OpenAI SSE translation.
+    const streamResp = async (resp, onUpdate) => {
       const reader = resp.body.getReader()
       const dec = new TextDecoder()
+      let text = '', buf = ''
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        for (const line of dec.decode(value, { stream: true }).split('\n')) {
+        buf += dec.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() // keep the incomplete trailing line for the next read
+        for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           const d = line.slice(6).trim()
           if (d === '[DONE]') continue
@@ -313,13 +328,14 @@ export default function App() {
             const j = JSON.parse(d)
             const delta = j.choices?.[0]?.delta?.content
             if (delta) {
-              full += delta; t++
-              setMarkdown(full); setTokenCount(t * 4)
+              text += delta; t++
+              onUpdate(text); setTokenCount(t * 4)
               if (previewRef.current) previewRef.current.scrollTop = previewRef.current.scrollHeight
             }
           } catch {}
         }
       }
+      return text
     }
 
     // Build and send one proxy request
@@ -349,12 +365,30 @@ export default function App() {
       })
     }
 
+    // Sends a request and, if the provider replies with a rate-limit error, waits and
+    // retries automatically instead of aborting the whole multi-object run — a package
+    // with many members can legitimately burn through a per-minute token quota partway
+    // through. Any other error (e.g. object too large for the provider's budget) is not
+    // retried since waiting wouldn't help.
+    const RATE_LIMIT_MAX_ATTEMPTS = 3
+    const requestWithRetry = async (systemContent, userContent, maxOut) => {
+      for (let attempt = 1; attempt <= RATE_LIMIT_MAX_ATTEMPTS; attempt++) {
+        const resp = await callProxy(systemContent, userContent, maxOut)
+        if (resp.ok) return resp
+        const e = await resp.json().catch(() => ({}))
+        const message = e?.error?.message || `HTTP ${resp.status}`
+        const rateLimited = resp.status === 429 || /rate limit/i.test(message)
+        if (!rateLimited || attempt === RATE_LIMIT_MAX_ATTEMPTS) throw new Error(message)
+        const waitSec = parseInt(/(\d+)\s*seconds?/i.exec(message)?.[1], 10) || 60
+        setErrorMsg(`⏳ ${message} — reintentando automáticamente (intento ${attempt}/${RATE_LIMIT_MAX_ATTEMPTS})`)
+        await new Promise(r => setTimeout(r, waitSec * 1000))
+        setErrorMsg('')
+      }
+    }
+
     try {
       // ── Phase 1: one isolated request per PL/SQL object ──────────────────
       for (let oi = 0; oi < objects.length; oi++) {
-        // Separator goes BEFORE each object so the --- visually opens a new block
-        if (oi > 0) { full += '\n\n---\n\n'; setMarkdown(full) }
-
         const objCode = objects[oi]
 
         // A single oversized object (e.g. a very large PACKAGE BODY) is split
@@ -364,27 +398,24 @@ export default function App() {
           : [objCode]
 
         for (let pi = 0; pi < pieces.length; pi++) {
-          // Separator between pieces of the SAME object too, so two independently
-          // generated "## objeto" blocks never render glued together.
-          if (pi > 0) { full += '\n\n---\n\n'; setMarkdown(full) }
+          // Show the trailing separator immediately (a no-op if `sections` is still
+          // empty) so the preview visibly opens a new block while the request is
+          // still in flight, matching the previous eager-divider UX.
+          setMarkdown(renderMarkdown(''))
 
           const pieceLabel  = pieces.length > 1 ? ` — parte ${pi + 1} de ${pieces.length}` : ''
           const userContent = buildUserMessage(fileName, pieces[pi], oi, objects.length, fullManifest, pieceLabel)
-          const resp        = await callProxy(objSysPrompt, userContent, 8192)
-          if (!resp.ok) {
-            const e = await resp.json().catch(() => ({}))
-            throw new Error(e?.error?.message || `HTTP ${resp.status}`)
-          }
+          const resp        = await requestWithRetry(objSysPrompt, userContent, 8192)
           setPhase('streaming')
-          await streamResp(resp)
+          const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
+          sections.push(text)
         }
       }
 
       // ── Phase 2: executive index as a separate, focused request ──────────
       // Sending the index as its own request (with the full manifest as context)
       // ensures no object hallucination bleeds in from earlier context.
-      full += '\n\n---\n\n'
-      setMarkdown(full)
+      setMarkdown(renderMarkdown(''))
 
       const indexSysPrompt = `Eres un experto documentador PL/SQL Oracle. Genera UNICAMENTE el INDICE GENERAL del wiki en Markdown en espanol. No documentes objetos individuales.
 
@@ -418,17 +449,14 @@ Estructura exacta:
 |-----------------|----------------------------|`
 
       const indexUser = buildIndexMessage(fileName, code, fullManifest, isAnthropic)
-      const indexResp = await callProxy(indexSysPrompt, indexUser, 4096)
-      if (!indexResp.ok) {
-        const e = await indexResp.json().catch(() => ({}))
-        throw new Error(e?.error?.message || `HTTP ${indexResp.status}`)
-      }
-      await streamResp(indexResp)
+      const indexResp = await requestWithRetry(indexSysPrompt, indexUser, 4096)
+      const indexText = await streamResp(indexResp, partial => setMarkdown(renderMarkdown(partial)))
+      sections.push(indexText)
 
       setPhase('done')
     } catch (err) {
       if (err.name !== 'AbortError') { setErrorMsg(`❌ ${err.message}`); setPhase('error') }
-      else setPhase(full ? 'done' : 'idle')
+      else setPhase(sections.length > 0 ? 'done' : 'idle')
     } finally {
       clearInterval(timerRef.current)
     }
