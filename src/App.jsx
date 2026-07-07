@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import MarkdownRenderer from './components/MarkdownRenderer.jsx'
 import GitHubModal from './components/GitHubModal.jsx'
 import { OBJECT_DOC_PROMPT } from './constants/systemPrompt.js'
+import { stripOuterFence } from './utils/markdown.js'
 import './App.css'
 
 const COOKIE_NAME = 'plsql_api_key'
@@ -28,7 +29,7 @@ const CHUNK_GITHUB    = 8000
 const TOTAL_BUDGET_GH = 7600   // 8K minus safety margin
 
 // Subdivide a string into pieces of at most maxLen chars (fallback for oversized objects)
-function sliceAt(str, maxLen) {
+export function sliceAt(str, maxLen) {
   const pieces = []
   for (let i = 0; i < str.length; i += maxLen) pieces.push(str.slice(i, i + maxLen))
   return pieces
@@ -36,9 +37,14 @@ function sliceAt(str, maxLen) {
 
 // Blank out string literals and comments (keeping length/offsets intact) so object
 // detection never anchors on a CREATE PROCEDURE mentioned inside a comment or a
-// dynamic-SQL string literal.
-function maskNonCode(code) {
-  return code.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, m => ' '.repeat(m.length))
+// dynamic-SQL string literal — including Oracle's alternative q-quote syntax
+// (q'[...]', q'{...}', q'<...>', q'(...)', or q'X...X' for any other delimiter X),
+// which the classic '...' pattern alone doesn't recognize as a string boundary.
+export function maskNonCode(code) {
+  return code.replace(
+    /[qQ]'(?:\[[\s\S]*?\]|\{[\s\S]*?\}|<[\s\S]*?>|\([\s\S]*?\)|([^\s'])[\s\S]*?\1)'|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g,
+    m => ' '.repeat(m.length)
+  )
 }
 
 const OBJECT_HEADER_RE = /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\b/gi
@@ -48,7 +54,7 @@ const OBJECT_HEADER_RE = /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION|P
 // becomes N individual AI calls instead of one call for the whole body. Returns null if the
 // body can't be reliably balanced (unbalanced BEGIN/END, malformed code, etc.) — callers must
 // then fall back to sending the whole PACKAGE BODY as a single object, which is always safe.
-function splitPackageBodyMembers(bodyCode) {
+export function splitPackageBodyMembers(bodyCode) {
   const masked = maskNonCode(bodyCode)
   const HEADER_RE = /\b(PROCEDURE|FUNCTION)\s+(\w+)/gi
 
@@ -121,7 +127,7 @@ function splitPackageBodyMembers(bodyCode) {
 // than sent to the AI as a fake "object with no header". A PACKAGE BODY is further exploded into
 // one piece per member (see splitPackageBodyMembers) so each PROCEDURE/FUNCTION inside gets its
 // own isolated documentation call, same as a top-level object.
-function splitByObject(code) {
+export function splitByObject(code) {
   const masked = maskNonCode(code)
   const indices = []
   let m
@@ -151,7 +157,7 @@ function splitByObject(code) {
 
 // Extract object type + name pairs by delegating to splitByObject, so the manifest always
 // reflects exactly how the file was decomposed (including exploded PACKAGE BODY members).
-function extractManifest(code) {
+export function extractManifest(code) {
   return splitByObject(code)
     .map(piece => {
       const m = /\bCREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TRIGGER|TYPE)\s+(\w+)/i.exec(maskNonCode(piece))
@@ -161,7 +167,7 @@ function extractManifest(code) {
 }
 
 // Build the per-object documentation request message
-function buildUserMessage(fileName, objCode, objIndex, totalObjects, fullManifest, pieceLabel = '') {
+export function buildUserMessage(fileName, objCode, objIndex, totalObjects, fullManifest, pieceLabel = '') {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``]
 
   if (fullManifest.length > 0) {
@@ -184,7 +190,7 @@ function buildUserMessage(fileName, objCode, objIndex, totalObjects, fullManifes
 }
 
 // Build the final index/summary request message
-function buildIndexMessage(fileName, fullCode, manifest, isAnthropic) {
+export function buildIndexMessage(fileName, fullCode, manifest, isAnthropic) {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
   lines.push(`## Objetos documentados (${manifest.length} en total)`)
   manifest.forEach((o, i) => lines.push(`${i + 1}. **${o.type}** → \`${o.name}\``))
@@ -365,10 +371,22 @@ export default function App() {
       })
     }
 
-    // Sends a request and, if the provider replies with a rate-limit error, waits and
-    // retries automatically instead of aborting the whole multi-object run — a package
-    // with many members can legitimately burn through a per-minute token quota partway
-    // through. Any other error (e.g. object too large for the provider's budget) is not
+    // Waits `ms` milliseconds, but resolves early (rejecting with an AbortError) if the
+    // user hits Detener mid-wait — otherwise Stop would appear to do nothing until the
+    // full rate-limit backoff finished.
+    const waitMs = (ms) => new Promise((resolve, reject) => {
+      const signal = abortRef.current?.signal
+      if (!signal) { setTimeout(resolve, ms); return }
+      if (signal.aborted) { reject(new DOMException('Aborted', 'AbortError')); return }
+      const timer = setTimeout(resolve, ms)
+      signal.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')) }, { once: true })
+    })
+
+    // Sends a request and, if the provider replies with a rate-limit or transient server
+    // error, waits and retries automatically instead of aborting the whole multi-object
+    // run — a package with many members can legitimately burn through a per-minute token
+    // quota partway through, and a momentary 5xx blip shouldn't cost the rest of the batch
+    // either. Any other error (e.g. object too large for the provider's budget) is not
     // retried since waiting wouldn't help.
     const RATE_LIMIT_MAX_ATTEMPTS = 3
     const requestWithRetry = async (systemContent, userContent, maxOut) => {
@@ -377,17 +395,29 @@ export default function App() {
         if (resp.ok) return resp
         const e = await resp.json().catch(() => ({}))
         const message = e?.error?.message || `HTTP ${resp.status}`
-        const rateLimited = resp.status === 429 || /rate limit/i.test(message)
-        if (!rateLimited || attempt === RATE_LIMIT_MAX_ATTEMPTS) throw new Error(message)
-        const waitSec = parseInt(/(\d+)\s*seconds?/i.exec(message)?.[1], 10) || 60
+        // Status code is the primary signal; the message pattern is a narrow secondary
+        // check (requires "exceeded"/"wait" near "rate limit") so an unrelated error that
+        // merely mentions those words in passing doesn't trigger a pointless retry.
+        const isRateLimit  = resp.status === 429 || /rate.?limit.{0,40}(exceed|wait)/i.test(message)
+        const isServerBusy = resp.status >= 500 && resp.status < 600
+        if ((!isRateLimit && !isServerBusy) || attempt === RATE_LIMIT_MAX_ATTEMPTS) throw new Error(message)
+        const waitSec = isRateLimit ? (parseInt(/(\d+)\s*seconds?/i.exec(message)?.[1], 10) || 60) : 4
         setErrorMsg(`⏳ ${message} — reintentando automáticamente (intento ${attempt}/${RATE_LIMIT_MAX_ATTEMPTS})`)
-        await new Promise(r => setTimeout(r, waitSec * 1000))
+        await waitMs(waitSec * 1000)
         setErrorMsg('')
       }
     }
 
+    let failedCount = 0
+
     try {
       // ── Phase 1: one isolated request per PL/SQL object ──────────────────
+      // Each object's request/stream is its own try/catch: an object that fails for a
+      // reason OTHER than the user hitting Detener (network blip, provider error the
+      // retry gave up on, object too large for the budget, etc.) gets an error note in
+      // its own section instead of discarding every object documented so far AND every
+      // object still queued after it — the whole point of sending objects individually
+      // is that one bad object shouldn't cost the rest of the file.
       for (let oi = 0; oi < objects.length; oi++) {
         const objCode = objects[oi]
 
@@ -405,10 +435,19 @@ export default function App() {
 
           const pieceLabel  = pieces.length > 1 ? ` — parte ${pi + 1} de ${pieces.length}` : ''
           const userContent = buildUserMessage(fileName, pieces[pi], oi, objects.length, fullManifest, pieceLabel)
-          const resp        = await requestWithRetry(objSysPrompt, userContent, 8192)
-          setPhase('streaming')
-          const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
-          sections.push(text)
+          try {
+            const resp = await requestWithRetry(objSysPrompt, userContent, 8192)
+            setPhase('streaming')
+            const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
+            sections.push(stripOuterFence(text))
+          } catch (err) {
+            if (err.name === 'AbortError') throw err // user hit Detener — stop everything
+            failedCount++
+            const detected = extractManifest(pieces[pi])
+            const label = detected.length > 0 ? detected.map(o => `${o.type} \`${o.name}\``).join(', ') : `objeto ${oi + 1} de ${objects.length}`
+            sections.push(`## ⚠️ Error al documentar ${label}\n\nEste objeto no pudo documentarse: ${err.message}\n\nEl resto del archivo se documentó normalmente.`)
+          }
+          setMarkdown(renderMarkdown()) // re-sync in case stripOuterFence changed the last chunk shown mid-stream
         }
       }
 
@@ -418,6 +457,8 @@ export default function App() {
       setMarkdown(renderMarkdown(''))
 
       const indexSysPrompt = `Eres un experto documentador PL/SQL Oracle. Genera UNICAMENTE el INDICE GENERAL del wiki en Markdown en espanol. No documentes objetos individuales.
+
+NUNCA envuelvas la respuesta completa en un bloque de codigo (\`\`\`markdown, \`\`\`md o similar). Tu salida ya ES Markdown crudo -- empieza directamente con "# ".
 
 Estructura exacta:
 
@@ -449,12 +490,22 @@ Estructura exacta:
 |-----------------|----------------------------|`
 
       const indexUser = buildIndexMessage(fileName, code, fullManifest, isAnthropic)
-      const indexResp = await requestWithRetry(indexSysPrompt, indexUser, 4096)
-      const indexText = await streamResp(indexResp, partial => setMarkdown(renderMarkdown(partial)))
-      sections.push(indexText)
+      try {
+        const indexResp = await requestWithRetry(indexSysPrompt, indexUser, 4096)
+        const indexText = await streamResp(indexResp, partial => setMarkdown(renderMarkdown(partial)))
+        sections.push(stripOuterFence(indexText))
+      } catch (err) {
+        if (err.name === 'AbortError') throw err
+        failedCount++
+        sections.push(`## ⚠️ No se pudo generar el índice general\n\n${err.message}`)
+      }
+      setMarkdown(renderMarkdown())
 
+      if (failedCount > 0) setErrorMsg(`⚠️ ${failedCount} de ${objects.length + 1} secciones no se pudieron generar — revisa las notas de error dentro del documento.`)
       setPhase('done')
     } catch (err) {
+      // Only truly fatal cases land here now: the user hit Detener, or something failed
+      // before any per-object try/catch could run (e.g. splitByObject itself throwing).
       if (err.name !== 'AbortError') { setErrorMsg(`❌ ${err.message}`); setPhase('error') }
       else setPhase(sections.length > 0 ? 'done' : 'idle')
     } finally {

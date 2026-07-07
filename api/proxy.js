@@ -20,7 +20,6 @@ function translateAnthropicStream(readable) {
         if (raw === '[DONE]') { ctrl.enqueue(enc.encode('data: [DONE]\n\n')); continue }
         try {
           const j = JSON.parse(raw)
-          const text = j.delta?.text ?? j.delta?.type === 'text_delta' ? j.delta.text : null
           if (j.type === 'content_block_delta' && j.delta?.text) {
             const out = { choices: [{ delta: { content: j.delta.text } }] }
             ctrl.enqueue(enc.encode(`data: ${JSON.stringify(out)}\n\n`))

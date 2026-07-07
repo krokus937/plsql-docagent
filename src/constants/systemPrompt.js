@@ -13,6 +13,7 @@ REGLAS GLOBALES — cumplirlas siempre, sin excepción:
 4. Exactamente 2 ejemplos SQL con valores representativos del negocio (no genéricos).
 5. Sin bloque EXCEPTION → escribe: "Este objeto no contiene bloque EXCEPTION. Los errores se propagan al llamador."
 6. Transaccionalidad: ✅ autónomo (COMMIT/ROLLBACK propio) · ✅ participante (DML sin COMMIT) · ❌ No (solo SELECT)
+7. NUNCA envuelvas la respuesta completa en un bloque de código (\`\`\`markdown, \`\`\`md o similar). Tu salida ya ES Markdown crudo — empieza directamente con "## ". Los únicos bloques \`\`\`sql permitidos son los de la sección de Ejemplos de Uso.
 
 EMOJI por tipo: ⚙️ PROCEDURE · 🔧 FUNCTION · 📦 PACKAGE / PACKAGE BODY · ⚡ TRIGGER · 🔷 TYPE
 

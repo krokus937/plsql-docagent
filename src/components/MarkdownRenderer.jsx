@@ -1,3 +1,5 @@
+import { stripOuterFence } from '../utils/markdown.js'
+
 // ─── Inline text with bold, italic, code ─────────────────────────────────────
 export const InlineText = ({ text }) => {
   if (!text) return null
@@ -21,12 +23,32 @@ export const InlineText = ({ text }) => {
 export default function MarkdownRenderer({ text }) {
   if (!text) return null
 
-  const lines = text.split('\n')
+  // Defense in depth: even though the app already strips a whole-response ```markdown
+  // fence before storing it, render straight from whatever text this component is given
+  // (pasted content, a different caller, an edge case the upstream strip missed) without
+  // ever collapsing the real document into one opaque code block.
+  const lines = stripOuterFence(text).split('\n')
   const out = []
   let i = 0
   let codeLines = [], inCode = false, codeLang = ''
   let tableLines = [], inTable = false
   let listItems = [], inList = false, listOrdered = false
+
+  const pushCodeBlock = (lang, codeText) => {
+    out.push(
+      <div key={`code-${out.length}`} style={{ margin: '0.8rem 0', borderRadius: 8, overflow: 'hidden', border: '1px solid #1e3a5a' }}>
+        <div style={{ background: '#080e1c', padding: '0.4rem 0.8rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #1a2a4a' }}>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {['#ff5f57','#febc2e','#28c840'].map(c => <div key={c} style={{ width: 8, height: 8, borderRadius: '50%', background: c }} />)}
+          </div>
+          <span style={{ fontSize: '0.6rem', color: '#3a5a7a', letterSpacing: '1.5px', textTransform: 'uppercase' }}>{lang}</span>
+        </div>
+        <pre style={{ background: '#040810', padding: '0.8rem 1rem', margin: 0, fontSize: 'clamp(0.65rem,1.2vw,0.78rem)', color: '#7ec8e3', lineHeight: 1.6, overflowX: 'auto', fontFamily: 'monospace', WebkitOverflowScrolling: 'touch' }}>
+          <code>{codeText}</code>
+        </pre>
+      </div>
+    )
+  }
 
   const flushList = () => {
     if (!listItems.length) return
@@ -89,19 +111,7 @@ export default function MarkdownRenderer({ text }) {
         flushList(); if (inTable) flushTable()
         inCode = true; codeLang = line.slice(3).trim() || 'sql'; codeLines = []
       } else {
-        out.push(
-          <div key={`code-${out.length}`} style={{ margin: '0.8rem 0', borderRadius: 8, overflow: 'hidden', border: '1px solid #1e3a5a' }}>
-            <div style={{ background: '#080e1c', padding: '0.4rem 0.8rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #1a2a4a' }}>
-              <div style={{ display: 'flex', gap: 4 }}>
-                {['#ff5f57','#febc2e','#28c840'].map(c => <div key={c} style={{ width: 8, height: 8, borderRadius: '50%', background: c }} />)}
-              </div>
-              <span style={{ fontSize: '0.6rem', color: '#3a5a7a', letterSpacing: '1.5px', textTransform: 'uppercase' }}>{codeLang}</span>
-            </div>
-            <pre style={{ background: '#040810', padding: '0.8rem 1rem', margin: 0, fontSize: 'clamp(0.65rem,1.2vw,0.78rem)', color: '#7ec8e3', lineHeight: 1.6, overflowX: 'auto', fontFamily: 'monospace', WebkitOverflowScrolling: 'touch' }}>
-              <code>{codeLines.join('\n')}</code>
-            </pre>
-          </div>
-        )
+        pushCodeBlock(codeLang, codeLines.join('\n'))
         inCode = false; codeLines = []
       }
       i++; continue
@@ -145,6 +155,10 @@ export default function MarkdownRenderer({ text }) {
   }
   if (inList) flushList()
   if (inTable) flushTable()
+  // An unclosed fence at end-of-text (still streaming, or a response truncated by
+  // max_tokens mid-example) used to silently drop everything typed into it so far —
+  // render what's been captured instead of losing it.
+  if (inCode) pushCodeBlock(codeLang, codeLines.join('\n'))
 
   return <div>{out}</div>
 }
