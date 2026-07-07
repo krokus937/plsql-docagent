@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import MarkdownRenderer from './components/MarkdownRenderer.jsx'
 import GitHubModal from './components/GitHubModal.jsx'
-import { OBJECT_DOC_PROMPT, OBJECT_DOC_CONTINUATION_PROMPT } from './constants/systemPrompt.js'
+import { OBJECT_DOC_PROMPT, OBJECT_DOC_CONTINUATION_PROMPT, OBJECT_DOC_CONSOLIDATE_PROMPT } from './constants/systemPrompt.js'
 import { stripOuterFence } from './utils/markdown.js'
 import './App.css'
 
@@ -249,6 +249,16 @@ export function buildContinuationMessage(fileName, objCode, digest, pieceLabel) 
   return lines.join('\n')
 }
 
+// Build the message for the one-shot consolidation request: takes the running digest
+// (the object's original full doc, with any genuinely-new continuation findings appended
+// as loose notes) and asks for it back as ONE clean, properly structured section — so the
+// final wiki never shows a "Continuación" appendix bolted onto the real documentation.
+export function buildConsolidationMessage(fileName, draft) {
+  const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
+  lines.push('## Borrador a reorganizar', '', draft)
+  return lines.join('\n')
+}
+
 // Build the final index/summary request message
 export function buildIndexMessage(fileName, fullCode, manifest, isAnthropic) {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
@@ -492,10 +502,19 @@ export default function App() {
         // continuation piece so it can compare against real prior content instead of a blind
         // "trust that it was covered" instruction. Seeded with the first piece's full doc;
         // capped so a very chatty object can't blow past the provider's token budget.
+        // Continuation pieces are NEVER pushed to `sections` directly — their raw "### 📎
+        // Continuación" notes would show up as ugly appendix blocks in the final wiki. They
+        // only feed this digest; once every piece is in, either the digest (if nothing new
+        // turned up) or a single consolidated rewrite (if something did) becomes the ONE
+        // section for this object, indistinguishable from an object that was never sliced.
         let digest = ''
+        let hasNewFindings = false
+        let firstPieceFailed = false
         const DIGEST_CAP = 4000
 
         for (let pi = 0; pi < pieces.length; pi++) {
+          if (firstPieceFailed) break // no base doc to build continuations on top of
+
           // Show the trailing separator immediately (a no-op if `sections` is still
           // empty) so the preview visibly opens a new block while the request is
           // still in flight, matching the previous eager-divider UX.
@@ -517,22 +536,47 @@ export default function App() {
             setPhase('streaming')
             const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
             const clean = stripOuterFence(text)
-            sections.push(clean)
             if (pi === 0) {
               digest = clean
             } else if (!/Sin información adicional relevante/i.test(clean)) {
               digest += '\n\n' + clean.replace(/^###[^\n]*\n+/, '').trim()
               if (digest.length > DIGEST_CAP) digest = digest.slice(-DIGEST_CAP)
+              hasNewFindings = true
             }
           } catch (err) {
             if (err.name === 'AbortError') throw err // user hit Detener — stop everything
             failedCount++
-            const detected = extractManifest(pieces[pi])
-            const label = detected.length > 0 ? detected.map(o => `${o.type} \`${o.name}\``).join(', ') : `objeto ${oi + 1} de ${objects.length}`
-            sections.push(`## ⚠️ Error al documentar ${label}\n\nEste objeto no pudo documentarse: ${err.message}\n\nEl resto del archivo se documentó normalmente.`)
+            if (pi === 0) {
+              firstPieceFailed = true
+              const detected = extractManifest(pieces[pi])
+              const label = detected.length > 0 ? detected.map(o => `${o.type} \`${o.name}\``).join(', ') : `objeto ${oi + 1} de ${objects.length}`
+              digest = `## ⚠️ Error al documentar ${label}\n\nEste objeto no pudo documentarse: ${err.message}\n\nEl resto del archivo se documentó normalmente.`
+            }
+            // A continuation piece failing just means one fragment's worth of extra detail
+            // is missed — the object still has a valid base doc, so it's not worth
+            // cluttering the final wiki with an error block over it.
           }
-          setMarkdown(renderMarkdown()) // re-sync in case stripOuterFence changed the last chunk shown mid-stream
         }
+
+        // One more request, ONLY if a continuation piece actually found something new:
+        // rewrite the base doc as a single polished section with those findings merged
+        // into their proper tables/notes, instead of leaving loose "Continuación" addenda.
+        if (hasNewFindings && !isAnthropic) {
+          try {
+            const consolidateUser = buildConsolidationMessage(fileName, digest)
+            const resp = await requestWithRetry(OBJECT_DOC_CONSOLIDATE_PROMPT, consolidateUser, 8192)
+            setPhase('streaming')
+            const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
+            digest = stripOuterFence(text)
+          } catch (err) {
+            if (err.name === 'AbortError') throw err
+            // Fall back to the un-merged base doc — still complete and correct, just
+            // without the extra findings folded in. Not worth failing the whole object over.
+          }
+        }
+
+        sections.push(digest)
+        setMarkdown(renderMarkdown())
       }
 
       // ── Phase 2: executive index as a separate, focused request ──────────

@@ -93,3 +93,18 @@ Formato de salida obligatorio:
 ### 📎 Continuación — información adicional detectada
 
 [tu nota aquí, o el texto de "sin información adicional" si no aplica]`
+
+// Used ONLY after at least one continuation piece found genuinely new information (see the
+// Phase 1 loop in App.jsx). The draft at that point is the object's original full doc with
+// loose "### 📎 Continuación" note(s) appended below it — this prompt asks for it back as
+// ONE clean section with those notes properly merged into their matching tables/bullets, so
+// the final wiki never shows a visible "continuation" appendix bolted onto a real object.
+export const OBJECT_DOC_CONSOLIDATE_PROMPT = `Eres un experto documentador PL/SQL Oracle. Se te entrega un borrador: la documentación completa de UN objeto, seguida de una o más notas sueltas de "Continuación" con hallazgos adicionales detectados en fragmentos de código posteriores del MISMO objeto (que tuvo que dividirse por el límite de tokens del proveedor).
+
+INSTRUCCIÓN CRÍTICA:
+1. Devuelve UNA SOLA versión final, pulida y completa de la documentación — el mismo objeto, con la misma estructura de encabezados (## para el objeto, ### para sus secciones) que ya tiene el borrador.
+2. Incorpora cada hallazgo de las notas de "Continuación" en la sección que le corresponda: una fila nueva en la tabla de Dependencias si es una dependencia, una fila nueva en Manejo de Errores si es sobre errores, un bullet nuevo en Notas Técnicas si es otra cosa relevante.
+3. Elimina por completo los encabezados "### 📎 Continuación" y cualquier mención de que el objeto fue dividido en piezas — el resultado debe leerse como si siempre hubiera sido un solo documento.
+4. No inventes nada que no esté ya en el borrador. Si una nota de continuación dice "sin información adicional", ignórala (no debería llegarte ninguna así, pero si llega, simplemente no la reflejes).
+5. Todo en español. Nunca envuelvas la respuesta en un bloque de código externo.
+6. Devuelve el documento COMPLETO desde su título "## ..." — no un resumen, no un diff, no solo lo que cambió.`
