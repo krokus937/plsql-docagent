@@ -1,23 +1,18 @@
-// Dedicated prompt for per-object documentation.
-// NO mention of index/summary — those are generated in a separate final request.
-// Uses ## for the object header and ### for sections, so the resulting wiki has
-// a clear visual hierarchy: ## object > ### section > #### sub-section.
-export const OBJECT_DOC_PROMPT = `Eres un experto documentador PL/SQL Oracle. Documenta el objeto PL/SQL que se te entrega en Markdown en español.
-
-INSTRUCCIÓN CRÍTICA: Genera ÚNICAMENTE la documentación de este objeto. NO incluyas ÍNDICE GENERAL, Resumen Ejecutivo, Tabla de Contenidos ni Diagrama de Dependencias.
-
-REGLAS GLOBALES — cumplirlas siempre, sin excepción:
+// Shared between OBJECT_DOC_PROMPT and OBJECT_DOC_SYNTHESIZE_PROMPT so both are held to the
+// EXACT same structural rigor — these are the only two prompts that ever write the actual
+// documentation for an object. Edit the template in ONE place; both prompts pick it up.
+const REGLAS_GLOBALES = `REGLAS GLOBALES — cumplirlas siempre, sin excepción:
 1. Solo Markdown puro. Sin texto introductorio fuera del formato.
 2. Todo en español. Usa los nombres REALES del código — nunca copies placeholders entre [corchetes].
 3. Omite secciones vacías: si no hay parámetros IN, elimina esa sección completamente.
 4. Exactamente 2 ejemplos SQL con valores representativos del negocio (no genéricos).
 5. Sin bloque EXCEPTION → escribe: "Este objeto no contiene bloque EXCEPTION. Los errores se propagan al llamador."
 6. Transaccionalidad: ✅ autónomo (COMMIT/ROLLBACK propio) · ✅ participante (DML sin COMMIT) · ❌ No (solo SELECT)
-7. NUNCA envuelvas la respuesta completa en un bloque de código (\`\`\`markdown, \`\`\`md o similar). Tu salida ya ES Markdown crudo — empieza directamente con "## ". Los únicos bloques \`\`\`sql permitidos son los de la sección de Ejemplos de Uso.
+7. NUNCA envuelvas la respuesta completa en un bloque de código (\`\`\`markdown, \`\`\`md o similar). Tu salida ya ES Markdown crudo — empieza directamente con "## ". Los únicos bloques \`\`\`sql permitidos son los de la sección de Ejemplos de Uso.`
 
-EMOJI por tipo: ⚙️ PROCEDURE · 🔧 FUNCTION · 📦 PACKAGE / PACKAGE BODY · ⚡ TRIGGER · 🔷 TYPE
+const ESTRUCTURA_OBLIGATORIA = `EMOJI por tipo: ⚙️ PROCEDURE · 🔧 FUNCTION · 📦 PACKAGE / PACKAGE BODY · ⚡ TRIGGER · 🔷 TYPE
 
-ESTRUCTURA OBLIGATORIA — usa EXACTAMENTE estos niveles de encabezado (## para el objeto, ### para sus secciones):
+ESTRUCTURA OBLIGATORIA — usa EXACTAMENTE estos niveles de encabezado (## para el objeto, ### para sus secciones). Ninguna de estas secciones (salvo las marcadas como omitibles) puede faltar:
 
 ## [emoji] [TIPO_EN_MAYÚSCULAS] — \`NOMBRE_REAL\`
 
@@ -74,37 +69,54 @@ _(Incluir solo las que aparecen en el código)_
 - **Seguridad:** _(solo si aplica: SQL dinámico con EXECUTE IMMEDIATE, AUTHID)_
 - **Restricciones de uso:** _(solo si aplica: prerrequisitos, orden de llamada, dependencia de estado de sesión)_`
 
-// Used ONLY for pieces 2+ of an object that had to be sliced to fit GitHub Models' token
-// budget (see sliceAtStatementBoundary in App.jsx). Unlike a blind "trust it was already
-// covered" instruction, the user message for these pieces (buildContinuationMessage)
-// includes the actual running digest of everything found in earlier pieces of the SAME
-// object — so the model can read exactly what's already documented and compare against it
-// before deciding whether this fragment adds anything genuinely new.
-export const OBJECT_DOC_CONTINUATION_PROMPT = `Eres un experto documentador PL/SQL Oracle. Este objeto se dividió en varias piezas por el límite de tokens del proveedor. En el mensaje del usuario verás, primero, exactamente lo que ya se documentó de este objeto en piezas anteriores, y después un fragmento ADICIONAL de código real (no un objeto nuevo).
+// Dedicated prompt for per-object documentation.
+// NO mention of index/summary — those are generated in a separate final request.
+// Uses ## for the object header and ### for sections, so the resulting wiki has
+// a clear visual hierarchy: ## object > ### section > #### sub-section.
+export const OBJECT_DOC_PROMPT = `Eres un experto documentador PL/SQL Oracle. Documenta el objeto PL/SQL que se te entrega en Markdown en español.
 
-INSTRUCCIÓN CRÍTICA:
-1. Lee con atención lo ya documentado que se te muestra — NO repitas el título, la descripción, los ejemplos ni nada que ya esté ahí.
-2. Compara el fragmento de código nuevo contra ese contenido y reporta ÚNICAMENTE información genuinamente nueva (dependencias no mencionadas, manejo de errores adicional, lógica de negocio relevante que no aparecía antes).
-3. Si todo lo relevante de este fragmento ya está cubierto por lo ya documentado, responde EXACTAMENTE: "_(Sin información adicional relevante en este fragmento.)_" y nada más.
-4. Todo en español. Nunca envuelvas la respuesta en un bloque de código.
+INSTRUCCIÓN CRÍTICA: Genera ÚNICAMENTE la documentación de este objeto. NO incluyas ÍNDICE GENERAL, Resumen Ejecutivo, Tabla de Contenidos ni Diagrama de Dependencias.
 
-Formato de salida obligatorio:
+${REGLAS_GLOBALES}
 
-### 📎 Continuación — información adicional detectada
+${ESTRUCTURA_OBLIGATORIA}`
 
-[tu nota aquí, o el texto de "sin información adicional" si no aplica]`
+// Used for EVERY piece of an object that had to be sliced to fit GitHub Models' token budget
+// (see sliceAtStatementBoundary in App.jsx) — including the FIRST piece. No piece tries to
+// write the final document anymore: each one only extracts and reports what it can observe
+// in its own code fragment (signature/parameters if visible, purpose clues, dependencies,
+// error handling, business logic) into a running digest, comparing against everything found
+// in earlier pieces of the SAME object so it never repeats itself. Only the single synthesis
+// request at the end (OBJECT_DOC_SYNTHESIZE_PROMPT) ever sees the full picture and writes the
+// polished document — so it's informed by the WHOLE object, not just whichever chunk happened
+// to be first, and pieces are strictly symmetric (no special-cased "first piece").
+export const OBJECT_DOC_EXTRACT_PROMPT = `Eres un experto documentador PL/SQL Oracle. Este objeto se dividió en varias piezas de código por el límite de tokens del proveedor. En el mensaje del usuario verás, primero, exactamente lo que ya se recopiló de este objeto en piezas anteriores (o un aviso de que esta es la primera pieza), y después UN fragmento de código real (no necesariamente empieza o termina en un límite lógico).
 
-// Used ONLY after at least one continuation piece found genuinely new information (see the
-// Phase 1 loop in App.jsx). The draft at that point is the object's original full doc with
-// loose "### 📎 Continuación" note(s) appended below it — this prompt asks for it back as
-// ONE clean section with those notes properly merged into their matching tables/bullets, so
-// the final wiki never shows a visible "continuation" appendix bolted onto a real object.
-export const OBJECT_DOC_CONSOLIDATE_PROMPT = `Eres un experto documentador PL/SQL Oracle. Se te entrega un borrador: la documentación completa de UN objeto, seguida de una o más notas sueltas de "Continuación" con hallazgos adicionales detectados en fragmentos de código posteriores del MISMO objeto (que tuvo que dividirse por el límite de tokens del proveedor).
+INSTRUCCIÓN CRÍTICA: NO redactes la documentación final todavía — solo extrae y reporta observaciones crudas de ESTE fragmento, comparándolas contra lo ya recopilado para no repetir:
+1. Si es la primera pieza (no hay nada recopilado aún) y el fragmento incluye el encabezado CREATE del objeto, reporta la firma completa: nombre real, tipo (PROCEDURE/FUNCTION/etc.), todos los parámetros visibles con su tipo Oracle y modo (IN/OUT/IN OUT), y tipo de retorno si es FUNCTION.
+2. Reporta cualquier pista sobre el propósito de negocio que puedas inferir de este fragmento.
+3. Reporta dependencias (tablas, vistas, secuencias, paquetes Oracle, otras funciones/procedures) que aparezcan en este fragmento y no estén ya recopiladas.
+4. Reporta manejo de errores (bloques EXCEPTION, RAISE_APPLICATION_ERROR, validaciones) visible en este fragmento.
+5. Reporta lógica de negocio relevante (condiciones, cálculos, transacciones) visible en este fragmento.
+6. Si todo lo relevante de este fragmento ya está cubierto por lo ya recopilado y no hay firma nueva que reportar, responde EXACTAMENTE: "_(Sin información adicional relevante en este fragmento.)_" y nada más.
+7. Todo en español. Nunca envuelvas la respuesta en un bloque de código externo. No escribas secciones "## " de objeto ni ejemplos de uso todavía.
 
-INSTRUCCIÓN CRÍTICA:
-1. Devuelve UNA SOLA versión final, pulida y completa de la documentación — el mismo objeto, con la misma estructura de encabezados (## para el objeto, ### para sus secciones) que ya tiene el borrador.
-2. Incorpora cada hallazgo de las notas de "Continuación" en la sección que le corresponda: una fila nueva en la tabla de Dependencias si es una dependencia, una fila nueva en Manejo de Errores si es sobre errores, un bullet nuevo en Notas Técnicas si es otra cosa relevante.
-3. Elimina por completo los encabezados "### 📎 Continuación" y cualquier mención de que el objeto fue dividido en piezas — el resultado debe leerse como si siempre hubiera sido un solo documento.
-4. No inventes nada que no esté ya en el borrador. Si una nota de continuación dice "sin información adicional", ignórala (no debería llegarte ninguna así, pero si llega, simplemente no la reflejes).
-5. Todo en español. Nunca envuelvas la respuesta en un bloque de código externo.
-6. Devuelve el documento COMPLETO desde su título "## ..." — no un resumen, no un diff, no solo lo que cambió.`
+Formato de salida:
+
+### 📎 Observaciones de este fragmento
+
+[tus notas aquí, o el texto de "sin información adicional" si no aplica]`
+
+// Used ONCE per object, after ALL its pieces have been scanned by OBJECT_DOC_EXTRACT_PROMPT
+// (see the Phase 1 loop in App.jsx). Unlike the old "merge into an existing draft" approach,
+// there is no existing document yet at this point — only raw, fragment-by-fragment
+// observations. This is the ONLY request that ever writes the actual documentation for a
+// sliced object, so it's the only one that needs to follow ESTRUCTURA OBLIGATORIA, and it
+// does so with full knowledge of everything found across the whole object.
+export const OBJECT_DOC_SYNTHESIZE_PROMPT = `Eres un experto documentador PL/SQL Oracle. Este objeto se dividió en varias piezas de código por el límite de tokens del proveedor. Cada pieza fue escaneada por separado y sus observaciones crudas se recopilaron abajo — todavía NO existe una documentación final, son solo notas dispersas fragmento por fragmento.
+
+INSTRUCCIÓN CRÍTICA: Con base en TODAS las observaciones recopiladas, escribe la documentación COMPLETA y pulida de este objeto siguiendo EXACTAMENTE la ESTRUCTURA OBLIGATORIA de abajo. Sintetiza la información dispersa en un documento único, coherente y bien redactado — no la copies literalmente como una lista de notas, y no menciones que el objeto fue dividido en piezas.
+
+${REGLAS_GLOBALES}
+
+${ESTRUCTURA_OBLIGATORIA}`

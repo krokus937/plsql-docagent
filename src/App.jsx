@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import MarkdownRenderer from './components/MarkdownRenderer.jsx'
 import GitHubModal from './components/GitHubModal.jsx'
-import { OBJECT_DOC_PROMPT, OBJECT_DOC_CONTINUATION_PROMPT, OBJECT_DOC_CONSOLIDATE_PROMPT } from './constants/systemPrompt.js'
+import { OBJECT_DOC_PROMPT, OBJECT_DOC_EXTRACT_PROMPT, OBJECT_DOC_SYNTHESIZE_PROMPT } from './constants/systemPrompt.js'
 import { stripOuterFence } from './utils/markdown.js'
 import './App.css'
 
@@ -235,27 +235,27 @@ export function buildUserMessage(fileName, objCode, objIndex, totalObjects, full
   return lines.join('\n')
 }
 
-// Build the message for a continuation piece (pieces 2+ of an object sliced for GitHub
-// Models' budget). Unlike buildUserMessage, this sends the running `digest` of everything
+// Build the message for ONE extraction piece of an object sliced for GitHub Models' budget
+// — used for every piece, including the first. Sends the running `digest` of everything
 // already found in earlier pieces of the SAME object as real context — the model can read
-// exactly what's already documented and compare against it, instead of only being told (via
-// OBJECT_DOC_CONTINUATION_PROMPT) to trust that something was already generated elsewhere.
-export function buildContinuationMessage(fileName, objCode, digest, pieceLabel) {
+// exactly what's already been observed and compare against it, instead of only being told
+// (via OBJECT_DOC_EXTRACT_PROMPT) to trust that something was already covered elsewhere.
+export function buildExtractMessage(fileName, objCode, digest, pieceLabel) {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
-  lines.push(`## Documentación ya generada de este objeto${pieceLabel}`, '')
-  lines.push(digest || '_(Aún no se detectó información adicional en piezas anteriores — esta es la primera pieza de continuación.)_')
-  lines.push('', `> ⚠️ **Fragmento adicional, no un objeto nuevo:** lo de arriba es TODO lo ya documentado de este objeto. No lo repitas. El código de abajo puede no empezar o terminar en un límite lógico (p. ej. a mitad de un bloque IF o LOOP) — es una continuación directa del fragmento anterior.`)
-  lines.push('', '## Código PL/SQL (fragmento adicional)', '', '```sql', objCode, '```')
+  lines.push(`## Observaciones ya recopiladas de este objeto${pieceLabel}`, '')
+  lines.push(digest || '_(Aún no se ha recopilado nada — este es el primer fragmento de este objeto.)_')
+  lines.push('', `> ⚠️ **Fragmento de un objeto más grande, no un objeto nuevo:** lo de arriba es TODO lo ya recopilado de este objeto. No lo repitas. El código de abajo puede no empezar o terminar en un límite lógico (p. ej. a mitad de un bloque IF o LOOP).`)
+  lines.push('', '## Código PL/SQL (fragmento)', '', '```sql', objCode, '```')
   return lines.join('\n')
 }
 
-// Build the message for the one-shot consolidation request: takes the running digest
-// (the object's original full doc, with any genuinely-new continuation findings appended
-// as loose notes) and asks for it back as ONE clean, properly structured section — so the
-// final wiki never shows a "Continuación" appendix bolted onto the real documentation.
-export function buildConsolidationMessage(fileName, draft) {
+// Build the message for the one-shot synthesis request: takes ALL the raw observations
+// collected across every piece of an object (never a pre-written draft — nothing writes the
+// final document until this single call) and asks for the actual, fully structured
+// documentation to be written from them.
+export function buildSynthesizeMessage(fileName, notes) {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
-  lines.push('## Borrador a reorganizar', '', draft)
+  lines.push('## Observaciones recopiladas de todos los fragmentos de este objeto', '', notes)
   return lines.join('\n')
 }
 
@@ -498,85 +498,84 @@ export default function App() {
           ? sliceAtStatementBoundary(objCode, CHUNK_GITHUB)
           : [objCode]
 
-        // Running record of what's already been documented for THIS object, fed into every
-        // continuation piece so it can compare against real prior content instead of a blind
-        // "trust that it was covered" instruction. Seeded with the first piece's full doc;
-        // capped so a very chatty object can't blow past the provider's token budget.
-        // Continuation pieces are NEVER pushed to `sections` directly — their raw "### 📎
-        // Continuación" notes would show up as ugly appendix blocks in the final wiki. They
-        // only feed this digest; once every piece is in, either the digest (if nothing new
-        // turned up) or a single consolidated rewrite (if something did) becomes the ONE
-        // section for this object, indistinguishable from an object that was never sliced.
-        let digest = ''
-        let hasNewFindings = false
-        let firstPieceFailed = false
-        const DIGEST_CAP = 4000
-
-        for (let pi = 0; pi < pieces.length; pi++) {
-          if (firstPieceFailed) break // no base doc to build continuations on top of
-
-          // Show the trailing separator immediately (a no-op if `sections` is still
-          // empty) so the preview visibly opens a new block while the request is
-          // still in flight, matching the previous eager-divider UX.
+        if (pieces.length === 1) {
+          // Common case, not sliced: one request, full documentation structure, as always.
           setMarkdown(renderMarkdown(''))
-
-          const pieceLabel = pieces.length > 1 ? ` — parte ${pi + 1} de ${pieces.length}` : ''
-          const isContinuation = pi > 0
-          // Only the FIRST piece gets the full documentation structure (title, description,
-          // examples, tables...). Continuation pieces (only reachable when GitHub Models'
-          // budget forced the slice) get the running digest as real context plus a shorter
-          // prompt that appends only genuinely new notes, on the lighter gpt-4o-mini model.
-          const userContent = isContinuation
-            ? buildContinuationMessage(fileName, pieces[pi], digest, pieceLabel)
-            : buildUserMessage(fileName, pieces[pi], oi, objects.length, fullManifest, pieceLabel)
-          const pieceSysPrompt = isContinuation ? OBJECT_DOC_CONTINUATION_PROMPT : objSysPrompt
-          const pieceModel     = isContinuation && !isAnthropic ? 'gpt-4o-mini' : undefined
+          const userContent = buildUserMessage(fileName, pieces[0], oi, objects.length, fullManifest)
           try {
-            const resp = await requestWithRetry(pieceSysPrompt, userContent, 8192, pieceModel)
+            const resp = await requestWithRetry(objSysPrompt, userContent, 8192)
             setPhase('streaming')
             const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
-            const clean = stripOuterFence(text)
-            if (pi === 0) {
-              digest = clean
-            } else if (!/Sin información adicional relevante/i.test(clean)) {
-              digest += '\n\n' + clean.replace(/^###[^\n]*\n+/, '').trim()
-              if (digest.length > DIGEST_CAP) digest = digest.slice(-DIGEST_CAP)
-              hasNewFindings = true
-            }
-          } catch (err) {
-            if (err.name === 'AbortError') throw err // user hit Detener — stop everything
-            failedCount++
-            if (pi === 0) {
-              firstPieceFailed = true
-              const detected = extractManifest(pieces[pi])
-              const label = detected.length > 0 ? detected.map(o => `${o.type} \`${o.name}\``).join(', ') : `objeto ${oi + 1} de ${objects.length}`
-              digest = `## ⚠️ Error al documentar ${label}\n\nEste objeto no pudo documentarse: ${err.message}\n\nEl resto del archivo se documentó normalmente.`
-            }
-            // A continuation piece failing just means one fragment's worth of extra detail
-            // is missed — the object still has a valid base doc, so it's not worth
-            // cluttering the final wiki with an error block over it.
-          }
-        }
-
-        // One more request, ONLY if a continuation piece actually found something new:
-        // rewrite the base doc as a single polished section with those findings merged
-        // into their proper tables/notes, instead of leaving loose "Continuación" addenda.
-        if (hasNewFindings && !isAnthropic) {
-          try {
-            const consolidateUser = buildConsolidationMessage(fileName, digest)
-            const resp = await requestWithRetry(OBJECT_DOC_CONSOLIDATE_PROMPT, consolidateUser, 8192)
-            setPhase('streaming')
-            const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
-            digest = stripOuterFence(text)
+            sections.push(stripOuterFence(text))
           } catch (err) {
             if (err.name === 'AbortError') throw err
-            // Fall back to the un-merged base doc — still complete and correct, just
-            // without the extra findings folded in. Not worth failing the whole object over.
+            failedCount++
+            const detected = extractManifest(pieces[0])
+            const label = detected.length > 0 ? detected.map(o => `${o.type} \`${o.name}\``).join(', ') : `objeto ${oi + 1} de ${objects.length}`
+            sections.push(`## ⚠️ Error al documentar ${label}\n\nEste objeto no pudo documentarse: ${err.message}\n\nEl resto del archivo se documentó normalmente.`)
           }
-        }
+          setMarkdown(renderMarkdown())
+        } else {
+          // Sliced object: every piece only extracts raw observations into a running digest
+          // — no piece writes the final document, so the eventual write-up is informed by
+          // the WHOLE object, not just whatever happened to be in the first chunk. The first
+          // piece runs on the full model rather than gpt-4o-mini: it's the one piece that
+          // (almost always) contains the CREATE header and full parameter list, so a missed
+          // or hallucinated signature there is the costliest possible extraction error —
+          // worth the extra accuracy margin. Later pieces are lower-stakes (they only ever
+          // ADD supplementary findings on top of an already-correct signature) and run on
+          // gpt-4o-mini for speed/cost and to spread load across GitHub Models' per-model
+          // rate-limit quotas.
+          let digest = ''
+          const DIGEST_CAP = 6000
 
-        sections.push(digest)
-        setMarkdown(renderMarkdown())
+          for (let pi = 0; pi < pieces.length; pi++) {
+            setMarkdown(renderMarkdown(''))
+            const pieceLabel  = ` — parte ${pi + 1} de ${pieces.length}`
+            const userContent = buildExtractMessage(fileName, pieces[pi], digest, pieceLabel)
+            const pieceModel  = !isAnthropic ? (pi === 0 ? 'gpt-4o' : 'gpt-4o-mini') : undefined
+            try {
+              const resp = await requestWithRetry(OBJECT_DOC_EXTRACT_PROMPT, userContent, 2048, pieceModel)
+              setPhase('streaming')
+              const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
+              const clean = stripOuterFence(text)
+              // Piece 0 is always kept even if it claims "nothing relevant" — it's the only
+              // piece guaranteed to have the CREATE header in front of it, so discarding it
+              // would leave the digest with zero information about the object's own identity.
+              if (pi === 0 || !/Sin información adicional relevante/i.test(clean)) {
+                digest += (digest ? '\n\n' : '') + clean.replace(/^###[^\n]*\n+/, '').trim()
+                if (digest.length > DIGEST_CAP) digest = digest.slice(-DIGEST_CAP)
+              }
+            } catch (err) {
+              if (err.name === 'AbortError') throw err // user hit Detener — stop everything
+              failedCount++
+              // One fragment's worth of observations is missed — the remaining pieces (and
+              // the final synthesis) can still work with whatever else got collected.
+            }
+          }
+
+          setMarkdown(renderMarkdown(''))
+          if (!digest.trim()) {
+            // Every piece failed or found nothing at all to report — nothing to synthesize.
+            failedCount++
+            sections.push(`## ⚠️ Error al documentar objeto ${oi + 1} de ${objects.length}\n\nNo se pudo recopilar información de ningún fragmento de este objeto.\n\nEl resto del archivo se documentó normalmente.`)
+          } else {
+            try {
+              const synthesizeUser = buildSynthesizeMessage(fileName, digest)
+              const resp = await requestWithRetry(OBJECT_DOC_SYNTHESIZE_PROMPT, synthesizeUser, 8192)
+              setPhase('streaming')
+              const text = await streamResp(resp, partial => setMarkdown(renderMarkdown(partial)))
+              sections.push(stripOuterFence(text))
+            } catch (err) {
+              if (err.name === 'AbortError') throw err
+              failedCount++
+              // Fall back to the raw collected notes rather than losing them outright —
+              // unstructured, but still real information, better than nothing.
+              sections.push(`${digest}\n\n_(⚠️ No se pudo generar el formato final pulido de este objeto; estas son las observaciones crudas recopiladas.)_`)
+            }
+          }
+          setMarkdown(renderMarkdown())
+        }
       }
 
       // ── Phase 2: executive index as a separate, focused request ──────────
