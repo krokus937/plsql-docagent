@@ -38,14 +38,26 @@ async function handleApiProxy(req, res) {
   res.end()
 }
 
+// The frontend does `resp.json()` on any non-ok response and reads `.error.message` (see
+// requestWithRetry in App.jsx) — the same shape api/proxy.js itself returns for upstream
+// errors. A plain-text body here would silently fail that parse and fall back to a generic
+// "HTTP 500" with no real information, hiding exactly the detail needed to diagnose a local
+// dev-only failure (corporate proxy, DNS, TLS interception, etc.).
+function sendJsonError(res, status, err) {
+  if (res.headersSent) { res.end(); return } // failed mid-stream, headers already committed
+  res.statusCode = status
+  res.setHeader('Content-Type', 'application/json')
+  res.end(JSON.stringify({ error: { message: err?.message || String(err) } }))
+}
+
 export default function apiProxyPlugin() {
   return {
     name: 'api-proxy',
     configureServer(server) {
-      server.middlewares.use('/api/proxy', (req, res) => { handleApiProxy(req, res).catch(err => { res.statusCode = 500; res.end(String(err)) }) })
+      server.middlewares.use('/api/proxy', (req, res) => { handleApiProxy(req, res).catch(err => sendJsonError(res, 500, err)) })
     },
     configurePreviewServer(server) {
-      server.middlewares.use('/api/proxy', (req, res) => { handleApiProxy(req, res).catch(err => { res.statusCode = 500; res.end(String(err)) }) })
+      server.middlewares.use('/api/proxy', (req, res) => { handleApiProxy(req, res).catch(err => sendJsonError(res, 500, err)) })
     },
   }
 }
