@@ -71,7 +71,7 @@ function describeError(err) {
   }
   let message = parts.join(' <- caused by: ')
   if (tlsHint) {
-    message += ' — esto normalmente significa que una red corporativa está interceptando el tráfico HTTPS (inspección TLS). Pide a IT el certificado raíz de la empresa y arranca el servidor con NODE_EXTRA_CA_CERTS apuntando a ese archivo .pem, en vez de deshabilitar la validación de certificados.'
+    message += ' — esto normalmente significa que una red corporativa está interceptando el tráfico HTTPS (inspección TLS). Primero prueba arrancar con NODE_USE_SYSTEM_CA=1 (Node 22+; reutiliza los certificados que Windows/tu navegador ya confían, sin pedir nada a IT). Si no funciona, pide a IT el certificado raíz de la empresa y usa NODE_EXTRA_CA_CERTS apuntando a ese archivo .pem. Evita deshabilitar la validación de certificados por completo.'
   }
   return message
 }

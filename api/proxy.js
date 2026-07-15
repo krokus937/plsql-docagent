@@ -33,6 +33,24 @@ function translateAnthropicStream(readable) {
   }))
 }
 
+// A non-ok upstream response is usually a clean JSON error body from the provider's own
+// API — but a 403/blocked request can instead come back from something in front of it (a
+// corporate proxy's own denial page, a WAF, an edge gateway), typically as HTML or plain
+// text. `.json()` on that throws, and silently falling back to `{}` — as this used to do —
+// hides the one piece of information (the actual page/message) needed to tell "the provider
+// rejected the key" apart from "something on the network blocked this before it ever reached
+// the provider". Read the raw text first so that detail is never thrown away.
+async function upstreamErrorResponse(upstream) {
+  const rawText = await upstream.text().catch(() => '')
+  let err
+  try { err = JSON.parse(rawText) }
+  catch { err = { error: { message: rawText ? rawText.slice(0, 500) : `HTTP ${upstream.status} (respuesta vacía del servidor)` } } }
+  return new Response(JSON.stringify(err), {
+    status: upstream.status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
 export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 })
@@ -83,13 +101,7 @@ export default async function handler(req) {
       body: JSON.stringify(anthropicBody),
     })
 
-    if (!upstream.ok) {
-      const err = await upstream.json().catch(() => ({}))
-      return new Response(JSON.stringify(err), {
-        status: upstream.status,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    }
+    if (!upstream.ok) return upstreamErrorResponse(upstream)
 
     return new Response(translateAnthropicStream(upstream.body), { headers: SSE_HEADERS })
   }
@@ -101,13 +113,7 @@ export default async function handler(req) {
     body: JSON.stringify(body),
   })
 
-  if (!upstream.ok) {
-    const err = await upstream.json().catch(() => ({}))
-    return new Response(JSON.stringify(err), {
-      status: upstream.status,
-      headers: { 'Content-Type': 'application/json' },
-    })
-  }
+  if (!upstream.ok) return upstreamErrorResponse(upstream)
 
   return new Response(upstream.body, { headers: SSE_HEADERS })
 }
