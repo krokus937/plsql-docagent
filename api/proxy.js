@@ -57,14 +57,35 @@ function extractReadableText(html) {
 // rejected the key" apart from "something on the network blocked this before it ever reached
 // the provider". Read the raw text first so that detail is never thrown away.
 async function upstreamErrorResponse(upstream) {
-  const rawText = await upstream.text().catch(() => '')
+  // Distinguish "the body genuinely had nothing in it" from "there was a body but reading/
+  // decoding it failed" (e.g. a proxy sending a malformed Content-Encoding) — collapsing both
+  // to the same empty string, as the previous version did, throws away which one happened.
+  let rawText = '', readErrorMessage = null
+  try { rawText = await upstream.text() } catch (readErr) { readErrorMessage = readErr?.message || String(readErr) }
+
   let err
   try {
     err = JSON.parse(rawText)
   } catch {
     const isHtml = /<html[\s>]|<!doctype html/i.test(rawText)
     const readable = isHtml ? extractReadableText(rawText) : rawText
-    err = { error: { message: readable ? readable.slice(0, 1000) : `HTTP ${upstream.status} (respuesta vacía del servidor)` } }
+    if (readable) {
+      err = { error: { message: readable.slice(0, 1000) } }
+    } else {
+      // Nothing readable — surface whatever headers/read-error we do have as a diagnostic
+      // trail instead of a bare, unhelpful "empty response".
+      const contentLength = upstream.headers.get('content-length')
+      const contentType   = upstream.headers.get('content-type')
+      const via           = upstream.headers.get('via') || upstream.headers.get('x-cache')
+      const details = [
+        `HTTP ${upstream.status}`,
+        readErrorMessage ? `no se pudo leer el cuerpo (${readErrorMessage})` : 'cuerpo vacío',
+        contentLength != null ? `content-length: ${contentLength}` : null,
+        contentType ? `content-type: ${contentType}` : null,
+        via ? `via/x-cache: ${via}` : null,
+      ].filter(Boolean).join(', ')
+      err = { error: { message: details } }
+    }
   }
   return new Response(JSON.stringify(err), {
     status: upstream.status,
