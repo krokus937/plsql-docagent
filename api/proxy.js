@@ -33,6 +33,22 @@ function translateAnthropicStream(readable) {
   }))
 }
 
+// Corporate proxy/WAF block pages are mostly <style>/<script>/markup boilerplate with the
+// actually identifying text (which security product, what it blocked) buried after all of
+// that — truncating the raw markup at a small character limit was cutting off before ever
+// reaching it. Strip tags/scripts/styles down to the readable title + body text instead, so
+// the identifying part survives even a short limit.
+function extractReadableText(html) {
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() || ''
+  const bodyText = html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return title && !bodyText.startsWith(title) ? `${title} — ${bodyText}` : bodyText
+}
+
 // A non-ok upstream response is usually a clean JSON error body from the provider's own
 // API — but a 403/blocked request can instead come back from something in front of it (a
 // corporate proxy's own denial page, a WAF, an edge gateway), typically as HTML or plain
@@ -43,8 +59,13 @@ function translateAnthropicStream(readable) {
 async function upstreamErrorResponse(upstream) {
   const rawText = await upstream.text().catch(() => '')
   let err
-  try { err = JSON.parse(rawText) }
-  catch { err = { error: { message: rawText ? rawText.slice(0, 500) : `HTTP ${upstream.status} (respuesta vacía del servidor)` } } }
+  try {
+    err = JSON.parse(rawText)
+  } catch {
+    const isHtml = /<html[\s>]|<!doctype html/i.test(rawText)
+    const readable = isHtml ? extractReadableText(rawText) : rawText
+    err = { error: { message: readable ? readable.slice(0, 1000) : `HTTP ${upstream.status} (respuesta vacía del servidor)` } }
+  }
   return new Response(JSON.stringify(err), {
     status: upstream.status,
     headers: { 'Content-Type': 'application/json' },
