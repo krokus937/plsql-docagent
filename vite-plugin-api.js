@@ -43,11 +43,28 @@ async function handleApiProxy(req, res) {
 // errors. A plain-text body here would silently fail that parse and fall back to a generic
 // "HTTP 500" with no real information, hiding exactly the detail needed to diagnose a local
 // dev-only failure (corporate proxy, DNS, TLS interception, etc.).
+//
+// Node/undici's fetch() wraps any lower-level network failure in a generic
+// `TypeError: fetch failed` — the actually useful detail (ENOTFOUND, ECONNREFUSED, a TLS
+// certificate error, a proxy needing configuration, ...) lives in `err.cause`, not
+// `err.message`. Walk the cause chain so that detail isn't silently dropped.
+function describeError(err) {
+  const parts = []
+  let cur = err
+  const seen = new Set()
+  while (cur && !seen.has(cur)) {
+    seen.add(cur)
+    parts.push(cur.code ? `${cur.message} (${cur.code})` : (cur.message || String(cur)))
+    cur = cur.cause
+  }
+  return parts.join(' <- caused by: ')
+}
+
 function sendJsonError(res, status, err) {
   if (res.headersSent) { res.end(); return } // failed mid-stream, headers already committed
   res.statusCode = status
   res.setHeader('Content-Type', 'application/json')
-  res.end(JSON.stringify({ error: { message: err?.message || String(err) } }))
+  res.end(JSON.stringify({ error: { message: describeError(err) } }))
 }
 
 export default function apiProxyPlugin() {
