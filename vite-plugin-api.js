@@ -48,16 +48,32 @@ async function handleApiProxy(req, res) {
 // `TypeError: fetch failed` — the actually useful detail (ENOTFOUND, ECONNREFUSED, a TLS
 // certificate error, a proxy needing configuration, ...) lives in `err.cause`, not
 // `err.message`. Walk the cause chain so that detail isn't silently dropped.
+// These specific codes mean Node's TLS stack rejected a certificate it doesn't trust — by
+// far the most common cause on a corporate machine is a proxy doing TLS inspection (it
+// intercepts HTTPS and re-signs traffic with its own root cert, which Node correctly refuses
+// to trust unless told to). Node is doing the right thing here — the fix is telling it about
+// that corporate root CA, not disabling certificate validation.
+const TLS_TRUST_CODES = new Set([
+  'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED',
+])
+
 function describeError(err) {
   const parts = []
   let cur = err
   const seen = new Set()
+  let tlsHint = false
   while (cur && !seen.has(cur)) {
     seen.add(cur)
+    if (cur.code && TLS_TRUST_CODES.has(cur.code)) tlsHint = true
     parts.push(cur.code ? `${cur.message} (${cur.code})` : (cur.message || String(cur)))
     cur = cur.cause
   }
-  return parts.join(' <- caused by: ')
+  let message = parts.join(' <- caused by: ')
+  if (tlsHint) {
+    message += ' — esto normalmente significa que una red corporativa está interceptando el tráfico HTTPS (inspección TLS). Pide a IT el certificado raíz de la empresa y arranca el servidor con NODE_EXTRA_CA_CERTS apuntando a ese archivo .pem, en vez de deshabilitar la validación de certificados.'
+  }
+  return message
 }
 
 function sendJsonError(res, status, err) {
