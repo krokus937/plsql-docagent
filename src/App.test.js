@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { splitByObject, extractManifest, maskNonCode, splitPackageBodyMembers, sliceAtStatementBoundary } from './App.jsx'
+import { splitByObject, extractManifest, maskNonCode, splitPackageBodyMembers, sliceAtStatementBoundary, extractReadableText, extractErrorMessage } from './App.jsx'
+
+function fakeResponse({ status = 403, headers = {}, text, throwOnText }) {
+  return {
+    status,
+    headers: { get: (k) => headers[k.toLowerCase()] ?? null },
+    text: async () => { if (throwOnText) throw new Error(throwOnText); return text },
+  }
+}
 
 describe('maskNonCode', () => {
   it('blanks out line comments', () => {
@@ -270,5 +278,55 @@ describe('sliceAtStatementBoundary', () => {
     const expectedRoughly = Math.ceil(body.length / 5000)
     expect(pieces.length).toBeGreaterThanOrEqual(expectedRoughly)
     expect(pieces.length).toBeLessThan(expectedRoughly + 3)
+  })
+})
+
+describe('extractReadableText', () => {
+  it('extracts title + body text from an HTML block page, stripping scripts/styles/tags', () => {
+    const html = `<!doctype html><html><head><title>Access Denied</title><style>.x{color:red}</style></head><body><script>track()</script><h1>Access Denied</h1><p>Your request was blocked by Zscaler.</p></body></html>`
+    const result = extractReadableText(html)
+    expect(result).toContain('Access Denied')
+    expect(result).toContain('blocked by Zscaler')
+    expect(result).not.toContain('track()')
+    expect(result).not.toContain('color:red')
+  })
+})
+
+describe('extractErrorMessage', () => {
+  it('parses a normal JSON error body', async () => {
+    const resp = fakeResponse({ status: 401, text: JSON.stringify({ error: { message: 'invalid api key' } }) })
+    expect(await extractErrorMessage(resp)).toBe('invalid api key')
+  })
+
+  it('extracts readable text from an HTML block page', async () => {
+    const html = `<!doctype html><html><head><title>Access Denied</title></head><body><p>Blocked by corporate WAF.</p></body></html>`
+    const resp = fakeResponse({ status: 403, text: html })
+    const message = await extractErrorMessage(resp)
+    expect(message).toContain('Access Denied')
+    expect(message).toContain('Blocked by corporate WAF')
+  })
+
+  it('surfaces plain-text non-JSON non-HTML bodies as-is', async () => {
+    const resp = fakeResponse({ status: 403, text: 'Forbidden by WAF rule 123' })
+    expect(await extractErrorMessage(resp)).toBe('Forbidden by WAF rule 123')
+  })
+
+  it('reports diagnostic headers when the body is genuinely empty', async () => {
+    const resp = fakeResponse({
+      status: 403, text: '',
+      headers: { 'content-length': '14163', 'content-type': 'text/html; charset=utf-8', 'via': '1.1 corp-proxy' },
+    })
+    const message = await extractErrorMessage(resp)
+    expect(message).toContain('HTTP 403')
+    expect(message).toContain('cuerpo vacío')
+    expect(message).toContain('content-length: 14163')
+    expect(message).toContain('content-type: text/html; charset=utf-8')
+    expect(message).toContain('via/x-cache: 1.1 corp-proxy')
+  })
+
+  it('distinguishes a body read/decode failure from a genuinely empty body', async () => {
+    const resp = fakeResponse({ status: 403, throwOnText: 'decoding error' })
+    const message = await extractErrorMessage(resp)
+    expect(message).toContain('no se pudo leer el cuerpo (decoding error)')
   })
 })

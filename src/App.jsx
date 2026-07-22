@@ -8,6 +8,13 @@ import './App.css'
 const COOKIE_NAME = 'plsql_api_key'
 const COOKIE_DAYS = 30
 
+// Called directly from the browser — no backend/proxy involved. Both providers support CORS
+// for this: Anthropic requires the anthropic-dangerous-direct-browser-access header (see
+// callProvider below), GitHub Models allows it with no special header. models.github.ai
+// replaced models.inference.ai.azure.com, which GitHub fully retired 2025-10-17.
+const ANTHROPIC_API      = 'https://api.anthropic.com/v1/messages'
+const GITHUB_MODELS_API  = 'https://models.github.ai/inference/chat/completions'
+
 const getCookie = (name) => {
   const match = document.cookie.match(new RegExp(`(^| )${name}=([^;]+)`))
   return match ? decodeURIComponent(match[2]) : ''
@@ -259,6 +266,55 @@ export function buildSynthesizeMessage(fileName, notes) {
   return lines.join('\n')
 }
 
+// Corporate proxy/WAF block pages are mostly <style>/<script>/markup boilerplate with the
+// actually identifying text (which security product, what it blocked) buried after all of
+// that. Strip tags/scripts/styles down to the readable title + body text instead, so the
+// identifying part survives even a short limit.
+export function extractReadableText(html) {
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() || ''
+  const bodyText = html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return title && !bodyText.startsWith(title) ? `${title} — ${bodyText}` : bodyText
+}
+
+// A non-ok provider response is usually a clean JSON error body — but on a restrictive
+// network, a 403/blocked request can instead come back from something in front of it (a
+// corporate proxy's own denial page, a WAF), typically as HTML, plain text, or with an
+// announced Content-Length but no actual bytes delivered. Reading only .json() (and
+// swallowing failures) would hide exactly the detail needed to tell "the provider rejected
+// the key" apart from "something on the network blocked this before it ever reached the
+// provider" — so this always reads the raw text first and degrades gracefully.
+export async function extractErrorMessage(resp) {
+  let rawText = '', readErrorMessage = null
+  try { rawText = await resp.text() } catch (readErr) { readErrorMessage = readErr?.message || String(readErr) }
+
+  try {
+    const j = JSON.parse(rawText)
+    return j?.error?.message || `HTTP ${resp.status}`
+  } catch {
+    const isHtml = /<html[\s>]|<!doctype html/i.test(rawText)
+    const readable = isHtml ? extractReadableText(rawText) : rawText
+    if (readable) return readable.slice(0, 1000)
+
+    // Nothing readable — surface whatever headers/read-error we do have as a diagnostic
+    // trail instead of a bare, unhelpful "empty response".
+    const contentLength = resp.headers.get('content-length')
+    const contentType   = resp.headers.get('content-type')
+    const via           = resp.headers.get('via') || resp.headers.get('x-cache')
+    return [
+      `HTTP ${resp.status}`,
+      readErrorMessage ? `no se pudo leer el cuerpo (${readErrorMessage})` : 'cuerpo vacío',
+      contentLength != null ? `content-length: ${contentLength}` : null,
+      contentType ? `content-type: ${contentType}` : null,
+      via ? `via/x-cache: ${via}` : null,
+    ].filter(Boolean).join(', ')
+  }
+}
+
 // Build the final index/summary request message
 export function buildIndexMessage(fileName, fullCode, manifest, isAnthropic) {
   const lines = [`**Archivo:** \`${fileName || 'codigo.sql'}\``, '']
@@ -338,19 +394,26 @@ export default function App() {
 
   // ── API Key validation ───────────────────────────────────────────────────
   const validateApiKey = async () => {
-    const isAnthropic = apiKey.startsWith('sk-ant-')
-    const isGitHub    = apiKey.startsWith('ghp_') || apiKey.startsWith('github_pat_')
-    if (!isAnthropic && !isGitHub) { setApiKeyValid(false); return }
+    const isAnthropicKey = apiKey.startsWith('sk-ant-')
+    const isGitHub       = apiKey.startsWith('ghp_') || apiKey.startsWith('github_pat_')
+    if (!isAnthropicKey && !isGitHub) { setApiKeyValid(false); return }
     try {
-      const r = await fetch('/api/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          max_tokens: 5,
-          messages: [{ role: 'user', content: 'hi' }],
-        }),
-      })
+      const r = isAnthropicKey
+        ? await fetch(ANTHROPIC_API, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              'anthropic-dangerous-direct-browser-access': 'true',
+            },
+            body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] }),
+          })
+        : await fetch(GITHUB_MODELS_API, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify({ model: 'openai/gpt-4o-mini', max_tokens: 5, messages: [{ role: 'user', content: 'hi' }] }),
+          })
       setApiKeyValid(r.status !== 401 && r.status !== 403)
     } catch { setApiKeyValid(false) }
   }
@@ -381,11 +444,12 @@ export default function App() {
     let t = 0
     const renderMarkdown = (liveText) => [...sections, ...(liveText !== undefined ? [liveText] : [])].join('\n\n---\n\n')
 
-    // Streams one SSE response and returns its fully assembled text. Buffers any
-    // incomplete trailing line across reads() calls (a `data: {...}` JSON payload can
-    // be split across two network reads) so a chunk boundary can never silently drop
-    // or corrupt part of the response — mirrors the buffering api/proxy.js already
-    // does server-side for the Anthropic→OpenAI SSE translation.
+    // Streams one SSE response and returns its fully assembled text. Buffers any incomplete
+    // trailing line across read() calls (a `data: {...}` JSON payload can be split across two
+    // network reads) so a chunk boundary can never silently drop or corrupt part of the
+    // response. Anthropic and GitHub Models use different SSE event shapes — Anthropic's
+    // native `content_block_delta` events vs. GitHub's OpenAI-style `choices[0].delta` —
+    // now parsed directly here since there's no server-side proxy to normalize them first.
     const streamResp = async (resp, onUpdate) => {
       const reader = resp.body.getReader()
       const dec = new TextDecoder()
@@ -402,7 +466,9 @@ export default function App() {
           if (d === '[DONE]') continue
           try {
             const j = JSON.parse(d)
-            const delta = j.choices?.[0]?.delta?.content
+            const delta = isAnthropic
+              ? (j.type === 'content_block_delta' ? j.delta?.text : undefined)
+              : j.choices?.[0]?.delta?.content
             if (delta) {
               text += delta; t++
               onUpdate(text); setTokenCount(t * 4)
@@ -414,7 +480,8 @@ export default function App() {
       return text
     }
 
-    // Build and send one proxy request. `modelOverride` lets continuation pieces run on a
+    // Build and send one request directly to the provider (no backend/proxy — see
+    // ANTHROPIC_API/GITHUB_MODELS_API). `modelOverride` lets continuation pieces run on a
     // lighter model (gpt-4o-mini) instead of the default — see the CHUNK_GITHUB comment.
     const callProxy = async (systemContent, userContent, maxOut, modelOverride) => {
       const estimatedInput  = Math.ceil((systemContent.length + userContent.length) / 3.5)
@@ -426,12 +493,35 @@ export default function App() {
         throw new Error(`Objeto demasiado grande para GitHub Models (${estimatedInput} tokens de entrada est., limite ${MAX_INPUT_TOKENS_GH}). Usa una key de Anthropic para archivos de este tamano.`)
       }
 
-      return fetch('/api/proxy', {
+      if (isAnthropic) {
+        // Anthropic's own CORS support requires this exact opt-in header for direct
+        // browser calls — see docs.anthropic.com / the anthropic-dangerous-direct-
+        // browser-access header. System prompt is a top-level field, not a message.
+        return fetch(ANTHROPIC_API, {
+          method: 'POST',
+          signal: abortRef.current.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true',
+          },
+          body: JSON.stringify({
+            model: modelOverride || 'claude-sonnet-4-6',
+            max_tokens: maxOutputTokens,
+            stream: true,
+            system: systemContent,
+            messages: [{ role: 'user', content: userContent }],
+          }),
+        })
+      }
+
+      return fetch(GITHUB_MODELS_API, {
         method: 'POST',
         signal: abortRef.current.signal,
-        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: modelOverride || (isAnthropic ? 'claude-sonnet-4-6' : 'gpt-4o'),
+          model: modelOverride || 'openai/gpt-4o',
           max_tokens: maxOutputTokens,
           stream: true,
           messages: [
@@ -464,8 +554,7 @@ export default function App() {
       for (let attempt = 1; attempt <= RATE_LIMIT_MAX_ATTEMPTS; attempt++) {
         const resp = await callProxy(systemContent, userContent, maxOut, modelOverride)
         if (resp.ok) return resp
-        const e = await resp.json().catch(() => ({}))
-        const message = e?.error?.message || `HTTP ${resp.status}`
+        const message = await extractErrorMessage(resp)
         // Status code is the primary signal; the message pattern is a narrow secondary
         // check (requires "exceeded"/"wait" near "rate limit") so an unrelated error that
         // merely mentions those words in passing doesn't trigger a pointless retry.
@@ -533,7 +622,7 @@ export default function App() {
             setMarkdown(renderMarkdown(''))
             const pieceLabel  = ` — parte ${pi + 1} de ${pieces.length}`
             const userContent = buildExtractMessage(fileName, pieces[pi], digest, pieceLabel)
-            const pieceModel  = !isAnthropic ? (pi === 0 ? 'gpt-4o' : 'gpt-4o-mini') : undefined
+            const pieceModel  = !isAnthropic ? (pi === 0 ? 'openai/gpt-4o' : 'openai/gpt-4o-mini') : undefined
             try {
               const resp = await requestWithRetry(OBJECT_DOC_EXTRACT_PROMPT, userContent, 2048, pieceModel)
               setPhase('streaming')
@@ -906,7 +995,7 @@ Estructura exacta:
             <div className="footer-status">
               <div className={`status-dot ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`} />
               <span className={`status-text ${phase === 'done' ? 'done' : isRunning ? 'running' : ''}`}>
-                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : apiKey.startsWith('sk-ant-') ? 'claude-sonnet-4-6' : 'gpt-4o'}
+                {phase === 'done' ? '✓ GitHub Wiki Ready' : isRunning ? 'Processing...' : apiKey.startsWith('sk-ant-') ? 'claude-sonnet-4-6' : 'openai/gpt-4o'}
               </span>
             </div>
           </div>

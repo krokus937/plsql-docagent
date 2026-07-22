@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'fs'
-import apiProxyPlugin from './vite-plugin-api.js'
 
 const REPO_NAME = 'plsql-docagent'
 const { version } = JSON.parse(readFileSync('./package.json', 'utf-8'))
@@ -10,10 +9,9 @@ const { version } = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const isVercel = !!process.env.VERCEL
 
 export default defineConfig(({ command, mode }) => ({
-  // apiProxyPlugin serves /api/proxy directly from Vite (dev + preview), so local testing
-  // never needs the Vercel CLI — see vite-plugin-api.js. Vercel deployments are unaffected:
-  // it only adds this route when Vite itself is the one serving requests.
-  plugins: [react(), apiProxyPlugin()],
+  // Pure static build — the app calls Anthropic/GitHub Models directly from the browser
+  // (both support CORS for this), so there's no backend/proxy to serve here anymore.
+  plugins: [react()],
   // The GH Pages subpath is baked into the built HTML/asset URLs, so it must only apply to
   // the ACTUAL GH Pages build (`npm run deploy`, which passes --mode gh-pages) — a plain
   // `vite build` (the default 'production' mode) stays at base '/', so `vite preview` (and
